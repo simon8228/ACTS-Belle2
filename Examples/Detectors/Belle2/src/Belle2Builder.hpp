@@ -78,6 +78,7 @@ class Belle2Builder {
 		std::shared_ptr<const ActsPlugins::ITGeoIdentifierProvider> identifierProvider
 		    = std::make_shared<MyIdentifierProvider>();
 		std::vector<LayerConfig> layerConfigs;
+		std::vector<LayerConfig> pxd_layerConfigs;
 		std::shared_ptr<const Acts::IMaterialDecorator> materialDecorator = nullptr;
 	};
 
