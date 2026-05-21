@@ -15,7 +15,7 @@ from acts.examples import (
 import acts.examples.dd4hep
 import acts.examples.geant4
 import acts.examples.hepmc3
-from acts.examples.odd import getOpenDataDetector
+from acts.examples import Belle2
 from acts.examples.root import RootMaterialTrackWriter
 
 u = acts.UnitConstants
@@ -138,7 +138,7 @@ def main():
 
     detector = None
     if args.input == "":
-        detector = getOpenDataDetector()
+        detector = Belle2()
     elif args.input.endswith(".gdml"):
         detector = acts.examples.geant4.GdmlDetector(path=args.input)
     elif args.input.endswith(".sqlite") or args.input.endswith(".db"):
