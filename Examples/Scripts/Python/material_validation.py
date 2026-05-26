@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import math
 
 import acts
 from acts import (
@@ -142,6 +143,14 @@ def main():
         help="Eta range for generated particles",
     )
     p.add_argument(
+        "--theta-range",
+        nargs=2,
+        type=float,
+        metavar=("MIN_DEG", "MAX_DEG"),
+        default=None,
+        help="Theta range in degrees for generated particles (overrides --eta-range)",
+    )
+    p.add_argument(
         "--phi-range",
         nargs=2,
         type=float,
@@ -170,6 +179,13 @@ def main():
     )
 
     args = p.parse_args()
+
+    if args.theta_range is not None:
+        etas = [-math.log(math.tan(math.radians(t) / 2)) for t in args.theta_range]
+        eta_range = (min(etas), max(etas))
+    else:
+        eta_range = tuple(args.eta_range)
+
     materialDecorator = None
     if args.map != "":
         materialDecorator = acts.IMaterialDecorator.fromFile(args.map)
@@ -186,7 +202,7 @@ def main():
         surfaces=materialSurfaces,
         s=s,
         tracksPerEvent=args.tracks,
-        etaRange=tuple(args.eta_range),
+        etaRange=eta_range,
         phiRange=(args.phi_range[0] * u.degree, args.phi_range[1] * u.degree),
         materialTrackCollectionName=args.material_track_collection,
         outputFileBase=args.output,
