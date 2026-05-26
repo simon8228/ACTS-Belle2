@@ -44,6 +44,7 @@
 #include "Acts/Surfaces/DiscSurface.hpp"
 #include "Acts/Surfaces/RadialBounds.hpp"
 #include "Acts/Surfaces/RectangleBounds.hpp"
+#include "Acts/Surfaces/ConvexPolygonBounds.hpp"
 #include "Acts/Surfaces/TrapezoidBounds.hpp"
 #include "Acts/Utilities/AxisDefinitions.hpp"
 #include "Acts/Utilities/Helpers.hpp"
@@ -1154,38 +1155,41 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildLayers(
 
         auto sensorSurface = tgElementFront->surface().getSharedPtr();
 
-        if (sensorSurface->bounds().type() ==
-            Acts::SurfaceBounds::eConvexPolygon) {
-          Acts::MaterialSlab svdSlab(B2::Belle2Builder::kSiliconMaterial,
-                                     0.32 * Acts::UnitConstants::mm);
-          //   sensorSurface->assignSurfaceMaterial(
-          //       std::make_shared<Acts::HomogeneousSurfaceMaterial>(svdSlab));
-          sensorSurface->assignSurfaceMaterial(nullptr);
-          ACTS_INFO("Convex Polygon");
+        // Helper: assign ProtoSurfaceMaterial based on bounds type.
+        // Called for both front and back DSSD surfaces.
+        auto assignSensorMaterial = [&](std::shared_ptr<Acts::Surface> surf) {
+          if (surf->bounds().type() == Acts::SurfaceBounds::eConvexPolygon) {
+            // Slanted sensors have ConvexPolygon bounds (TGeo trapezoid).
+            // Derive bin ranges from the bounding box in local (X, Y).
+            const auto* polyBounds =
+                dynamic_cast<const Acts::ConvexPolygonBoundsBase*>(
+                    &surf->bounds());
+            if (polyBounds != nullptr) {
+              const auto& bbox = polyBounds->boundingBox();
+              Acts::BinUtility bu(5, -bbox.halfLengthX(), bbox.halfLengthX(),
+                                  Acts::open, Acts::AxisDirection::AxisX);
+              bu += Acts::BinUtility(5, -bbox.halfLengthY(), bbox.halfLengthY(),
+                                     Acts::open, Acts::AxisDirection::AxisY);
+              surf->assignSurfaceMaterial(
+                  std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+            }
+            ACTS_INFO("Sensor: ConvexPolygon - assigned ProtoSurfaceMaterial");
+          } else {
+            // Barrel sensors: Rectangle / Trapezoid bounds.
+            Acts::BinUtility bu(5, -1.0, 1.0, Acts::open,
+                                Acts::AxisDirection::AxisX);
+            bu += Acts::BinUtility(5, -1.0, 1.0, Acts::open,
+                                   Acts::AxisDirection::AxisY);
+            surf->assignSurfaceMaterial(
+                std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+            ACTS_INFO("Sensor: bounds type="
+                      << static_cast<int>(surf->bounds().type())
+                      << " - assigned ProtoSurfaceMaterial");
+          }
+        };
 
-        } else {
-          Acts::BinUtility bu(5, -1.0, 1.0, Acts::open,
-                              Acts::AxisDirection::AxisX);
-          bu += Acts::BinUtility(5, -1.0, 1.0, Acts::open,
-                                 Acts::AxisDirection::AxisY);
+        assignSensorMaterial(tgElementFront->surface().getSharedPtr());
 
-          sensorSurface->assignSurfaceMaterial(
-              std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-          ACTS_INFO("Not Convex Polygon, bounds type=" << static_cast<int>(sensorSurface->bounds().type()));
-        }
-        
-        // else if (const auto* rb = dynamic_cast<const Acts::RectangleBounds*>(
-        //         &sensorSurface->bounds())) {
-        //   Acts::BinUtility bu(20, -rb->halfLengthX(), rb->halfLengthX(),
-        //                       Acts::open, Acts::AxisDirection::AxisX);
-        //   bu += Acts::BinUtility(60, -rb->halfLengthY(), rb->halfLengthY(), // This binning is very important for Theta val
-        //                          Acts::open, Acts::AxisDirection::AxisY);
-        //   sensorSurface->assignSurfaceMaterial(
-        //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-        //   ACTS_INFO("sensor: halfLengthX=" << rb->halfLengthX() << " halfLengthY=" << rb->halfLengthY());
-
-        // }
-        
         sVector.push_back(tgElementFront->surface().getSharedPtr());
 
         if (layerCfg.isDSSD) {
@@ -1203,7 +1207,9 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildLayers(
               nullptr);
 
           m_elementStore.push_back(tgElementBack);
-          sVector.push_back(tgElementBack->surface().getSharedPtr());
+          auto backSurface = tgElementBack->surface().getSharedPtr();
+          assignSensorMaterial(backSurface);
+          sVector.push_back(backSurface);
         }
       }
 

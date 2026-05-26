@@ -175,7 +175,6 @@ if "__main__" == __name__:
         default="material_tracks",
         help="Input material track collection name",
     )
-    
     args = p.parse_args()
     logLevel = logging.INFO
 

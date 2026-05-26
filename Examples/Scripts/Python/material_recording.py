@@ -142,7 +142,6 @@ def main():
         default="material_geant4",
         help="Output file stem (without extension)",
     )
-
     args = p.parse_args()
 
     if args.theta_range is not None:

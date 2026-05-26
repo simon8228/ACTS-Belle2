@@ -177,7 +177,6 @@ def main():
         action="store_true",
         help="Enable propagation validation",
     )
-
     args = p.parse_args()
 
     if args.theta_range is not None:
@@ -191,7 +190,7 @@ def main():
         materialDecorator = acts.IMaterialDecorator.fromFile(args.map)
 
     from acts.examples import Belle2
-    detector = Belle2(materialDecorator = materialDecorator)
+    detector = Belle2(materialDecorator=materialDecorator)
     trackingGeometry = detector.trackingGeometry()
 
     materialSurfaces = trackingGeometry.extractMaterialSurfaces()

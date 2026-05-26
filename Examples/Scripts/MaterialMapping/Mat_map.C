@@ -90,6 +90,44 @@ void Draw_ratio(TCanvas* c, TProfile* h1, TProfile* h2, TLegend* leg, std::strin
 
 }
 
+/// Reposition theta-angle labels to the outer edge of the current pad.
+/// Must be called after Draw() + gPad->Update() so that the axis limits are final.
+/// Each label is placed where its theta-ray exits the visible area, stepping 3 % inward
+/// so the text is never clipped by the frame.  Text alignment is set automatically:
+///   - right boundary  → right-justify  (text extends inward to the left)
+///   - left  boundary  → left-justify   (text extends inward to the right)
+///   - top   boundary  → top-justify    (text extends inward downward)
+void UpdateLabelPositions(std::vector<TLatex*>& labels,
+                          const std::vector<int>& angles,
+                          double deg) {
+  double xMin = gPad->GetUxmin();
+  double xMax = gPad->GetUxmax();
+  double yMax = gPad->GetUymax();
+
+  for (int i = 0; i < (int)angles.size(); i++) {
+    double rad = angles[i] * deg;
+    double cth = TMath::Cos(rad);
+    double sth = TMath::Sin(rad);   // >= 0 for theta in (0, 180)
+
+    // Parameter t along the ray (z = t*cth, y = t*sth) at each pad boundary.
+    double t_right = (cth >  1e-10) ?  xMax / cth : 1e30;
+    double t_left  = (cth < -1e-10) ?  xMin / cth : 1e30;
+    double t_top   = (sth >  1e-10) ?  yMax / sth : 1e30;
+
+    // Smallest positive t → first boundary hit; choose matching text alignment.
+    double t_lim = t_right;
+    int    align = 32;                                     // right boundary: right-justify
+    if (t_left < t_lim) { t_lim = t_left; align = 12; }  // left  boundary: left-justify
+    if (t_top  < t_lim) { t_lim = t_top;  align = 23; }  // top   boundary: top-justify
+
+    // Step 3 % inside the boundary so the text is not clipped by the frame.
+    double t_lbl = t_lim * 0.97;
+    labels[i]->SetX(t_lbl * cth);
+    labels[i]->SetY(t_lbl * sth);
+    labels[i]->SetTextAlign(align);
+  }
+}
+
 /// Compare two set of material tracks (for example one obtain with propagator and material map and one with geantino scan).
 /// Draw the ammont of material (in X0) encounter by tracks as function of eta and phi.
 /// Plot the ratio between the two set to help identify inconsistency.
@@ -118,12 +156,10 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
   TChain *Val_file = new TChain("material_tracks");
   TChain *geantino_file = new TChain("material_tracks");
 
-  // Define reference lines for theta angles (upper half only)
+  // Define reference lines for theta angles (upper half only).
+  // Label positions are set per-canvas by UpdateLabelPositions() after Draw().
   const double kDeg = TMath::Pi() / 180.0;
   const double kLineR = 3000.0;
-  const double kLabelY = 22.0;
-  const double kZMax =  90.0;
-  const double kZMin = -65.0;
   const std::vector<int> kThetaAngles = {10, 20, 40, 70, 110, 140, 160, 170};
   std::vector<TLine*> theta_lines;
   std::vector<TLatex*> theta_labels;
@@ -133,20 +169,10 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
     TLine* l = new TLine(0, 0, z_end, y_end);
     l->SetLineColor(kRed);
     theta_lines.push_back(l);
-    double tan_th = TMath::Tan(th * kDeg);
-    double z_lbl = kLabelY / tan_th;
-    double y_lbl = kLabelY;
-    if (z_lbl > kZMax) {
-      z_lbl = kZMax;
-      y_lbl = kZMax * tan_th;
-    } else if (z_lbl < kZMin) {
-      z_lbl = kZMin;
-      y_lbl = kZMin * tan_th;
-    }
-    TLatex* lbl = new TLatex(z_lbl, y_lbl + 1.5, Form("%d#circ", th));
+    // Placeholder position (0, 0); UpdateLabelPositions() will move this.
+    TLatex* lbl = new TLatex(0, 0, Form("%d#circ", th));
     lbl->SetTextColor(kRed);
     lbl->SetTextSize(0.035);
-    lbl->SetTextAlign(21);
     theta_labels.push_back(lbl);
   }
 
@@ -156,6 +182,8 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
     // 2D map for Validation input
     TCanvas *VM = new TCanvas("VM","Validation Map",2000, 1000) ;
     Val_file->Draw("mat_y:mat_z","std::abs(mat_x)<1");
+    gPad->Update();  // finalise axis limits before computing label positions
+    UpdateLabelPositions(theta_labels, kThetaAngles, kDeg);
 
     for (auto* l : theta_lines) l->Draw("Same");
     for (auto* lbl : theta_labels) lbl->Draw("Same");
@@ -210,6 +238,8 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
     // 2D map for Geantino input
     TCanvas *GM = new TCanvas("GM","Geantino Map", 2000, 1000) ;
     geantino_file->Draw("mat_y:mat_z","std::abs(mat_x)<1");
+    gPad->Update();  // finalise axis limits before computing label positions
+    UpdateLabelPositions(theta_labels, kThetaAngles, kDeg);
 
     for (auto* l : theta_lines) l->Draw("Same");
     for (auto* lbl : theta_labels) lbl->Draw("Same");

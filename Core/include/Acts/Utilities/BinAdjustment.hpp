@@ -13,6 +13,7 @@
 #include "Acts/Surfaces/RadialBounds.hpp"
 #include "Acts/Surfaces/RectangleBounds.hpp"
 #include "Acts/Surfaces/Surface.hpp"
+#include "Acts/Surfaces/ConvexPolygonBounds.hpp"
 #include "Acts/Surfaces/TrapezoidBounds.hpp"
 #include "Acts/Utilities/AxisDefinitions.hpp"
 #include "Acts/Utilities/BinUtility.hpp"
@@ -226,6 +227,22 @@ static inline BinUtility adjustBinUtility(const BinUtility& bu,
   return uBinUtil;
 }
 
+/// @brief adjust the BinUtility bu to the dimensions of convex polygon bounds
+///
+/// @param bu BinUtility at source
+/// @param cpBounds the ConvexPolygonBounds to adjust to (uses bounding box)
+/// @param transform Transform for the adjusted @c BinUtility
+///
+/// @return new updated BinUtility
+static inline BinUtility adjustBinUtility(const BinUtility& bu,
+                                          const ConvexPolygonBoundsBase& cpBounds,
+                                          const Transform3& transform) {
+  // Delegate to the RectangleBounds overload using the polygon's bounding box.
+  // ConvexPolygonBoundsBase::boundingBox() returns the tightest enclosing
+  // RectangleBounds in local (X, Y) coordinates.
+  return adjustBinUtility(bu, cpBounds.boundingBox(), transform);
+}
+
 /// @brief adjust the BinUtility bu to a surface
 ///
 /// @param bu BinUtility at source
@@ -250,6 +267,10 @@ static inline BinUtility adjustBinUtility(const BinUtility& bu,
       return adjustBinUtility(bu, *b, surface.localToGlobalTransform(gctx));
     }
     if (auto b = dynamic_cast<const TrapezoidBounds*>(&(surface.bounds()));
+        b != nullptr) {
+      return adjustBinUtility(bu, *b, surface.localToGlobalTransform(gctx));
+    }
+    if (auto b = dynamic_cast<const ConvexPolygonBoundsBase*>(&(surface.bounds()));
         b != nullptr) {
       return adjustBinUtility(bu, *b, surface.localToGlobalTransform(gctx));
     }
