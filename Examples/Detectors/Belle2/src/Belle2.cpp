@@ -520,7 +520,7 @@ void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
             auto bounds = std::make_shared<Acts::CylinderBounds>(18_mm, 80_mm);
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(320, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
+            bu += Acts::BinUtility(80, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
             Acts::MutableProtoLayer pl(gctx, {surf});
             suppLayer.setProtoLayer(pl);
@@ -544,7 +544,7 @@ void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
             auto bounds = std::make_shared<Acts::CylinderBounds>(16_mm, 12.5_mm);
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(50, -12.5_mm, 12.5_mm, Acts::open, Acts::AxisDirection::AxisZ);
+            bu += Acts::BinUtility(15, -12.5_mm, 12.5_mm, Acts::open, Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
             Acts::MutableProtoLayer pl(gctx, {surf});
             suppLayer.setProtoLayer(pl);
@@ -556,7 +556,7 @@ void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
             auto bounds = std::make_shared<Acts::CylinderBounds>(16_mm, 12.5_mm);
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(50, -12.5_mm, 12.5_mm, Acts::open, Acts::AxisDirection::AxisZ);
+            bu += Acts::BinUtility(15, -12.5_mm, 12.5_mm, Acts::open, Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
             Acts::MutableProtoLayer pl(gctx, {surf});
             suppLayer.setProtoLayer(pl);
@@ -568,7 +568,7 @@ void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
             auto bounds = std::make_shared<Acts::CylinderBounds>(12.5_mm, 80_mm);
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(320, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
+            bu += Acts::BinUtility(80, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
             Acts::MutableProtoLayer pl(gctx, {surf});
             suppLayer.setProtoLayer(pl);
@@ -580,7 +580,7 @@ void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
             auto bounds = std::make_shared<Acts::CylinderBounds>(30_mm, 80_mm);
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(320, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
+            bu += Acts::BinUtility(80, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
             Acts::MutableProtoLayer pl(gctx, {surf});
             suppLayer.setProtoLayer(pl);
@@ -812,7 +812,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
                 Acts::Transform3::Identity(), bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
                                 Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(250, -250, 250, Acts::open,
+            bu += Acts::BinUtility(125, -250, 250, Acts::open,
                                    Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(
                 std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
@@ -828,7 +828,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
                                 Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(150, -150, 150, Acts::open,
+            bu += Acts::BinUtility(75, -150, 150, Acts::open,
                                    Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(
                 std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
@@ -844,7 +844,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
                                 Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(500, -500, 500, Acts::open,
+            bu += Acts::BinUtility(250, -500, 500, Acts::open,
                                    Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(
                 std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
@@ -864,7 +864,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
 
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
                                 Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(100, 35.0_mm, 135.0_mm, Acts::open,
+            bu += Acts::BinUtility(25, 35.0_mm, 135.0_mm, Acts::open,
                                    Acts::AxisDirection::AxisR);
             surf->assignSurfaceMaterial(
                 std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
@@ -884,7 +884,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
 
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
                                 Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(100, 35.0_mm, 135.0_mm, Acts::open,
+            bu += Acts::BinUtility(25, 35.0_mm, 135.0_mm, Acts::open,
                                    Acts::AxisDirection::AxisR);
             surf->assignSurfaceMaterial(
                 std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
