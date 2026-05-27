@@ -170,7 +170,7 @@ Gen3Belle2Builder::buildTrackingGeometry(
   using enum Acts::CylinderVolumeBounds::Face;
   ACTS_INFO("Belle2 construction in  Gen3 mode");
 
-  TGeoManager::Import("/home/configs/Belle2_SVD.root");  // set realpath later
+  TGeoManager::Import("/home/configs/Belle2_Beampipe_PXD_SVD.root");  // set realpath later
   std::string cdcFile = "wireInfo.csv";
 
   Blueprint::Config cfg;
@@ -192,8 +192,8 @@ Gen3Belle2Builder::buildTrackingGeometry(
     m_beamPipeMaterial)); bpMat.addStaticVolume(std::move(beampipe));
     });
     */
-    // buildBeamPipe(detector, gctx);
-    // buildPXD(detector, gctx);
+    buildBeamPipe(detector, gctx);
+    buildPXD(detector, gctx);
     buildSVD(detector, gctx);
     //buildCDC(detector, gctx);
   });
@@ -586,48 +586,6 @@ void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
             suppLayer.setProtoLayer(pl);
             suppLayer.setEnvelope(Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
           });
-          // pxdVol.addLayer("PXD_SuppDisk1", [&](auto& layer) {
-          //   double discZ = -62.0_mm;
-
-          //   auto bounds =
-          //       std::make_shared<Acts::RadialBounds>(15.0_mm, 30.0_mm);
-          //   auto transform = Acts::Transform3(Acts::Translation3(0, 0, discZ));
-          //   auto surf =
-          //       Acts::Surface::makeShared<Acts::DiscSurface>(transform, bounds);
-
-          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-          //                       Acts::AxisDirection::AxisPhi);
-          //   bu += Acts::BinUtility(15, 15.0_mm, 30.0_mm, Acts::open,
-          //                          Acts::AxisDirection::AxisR);
-          //   surf->assignSurfaceMaterial(
-          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-
-          //   Acts::MutableProtoLayer pl(gctx, {surf});
-          //   layer.setProtoLayer(pl);
-          //   layer.setEnvelope(
-          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {0_mm, 0_mm}}});
-          // });
-          // pxdVol.addLayer("PXD_SuppDisk2", [&](auto& layer) {
-          //   double discZ = 102.0_mm;
-
-          //   auto bounds =
-          //       std::make_shared<Acts::RadialBounds>(15.0_mm, 30.0_mm);
-          //   auto transform = Acts::Transform3(Acts::Translation3(0, 0, discZ));
-          //   auto surf =
-          //       Acts::Surface::makeShared<Acts::DiscSurface>(transform, bounds);
-
-          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-          //                       Acts::AxisDirection::AxisPhi);
-          //   bu += Acts::BinUtility(15, 15.0_mm, 30.0_mm, Acts::open,
-          //                          Acts::AxisDirection::AxisR);
-          //   surf->assignSurfaceMaterial(
-          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-
-          //   Acts::MutableProtoLayer pl(gctx, {surf});
-          //   layer.setProtoLayer(pl);
-          //   layer.setEnvelope(
-          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {0_mm, 0_mm}}});
-          // });
 
           for (int i = 0; i < 2; ++i) {
             std::string name = "PXD_Layer" + std::to_string(i + 1);
@@ -781,22 +739,6 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildPXDLayers(
           sensorSurface->assignSurfaceMaterial(
               std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
         }
-
-        // if (const auto* rb = dynamic_cast<const Acts::RectangleBounds*>(
-        //         &sensorSurface->bounds())) {
-        //   Acts::BinUtility bu(15, -rb->halfLengthX(), rb->halfLengthX(),
-        //                       Acts::open, Acts::AxisDirection::AxisX);
-        //   bu += Acts::BinUtility(5, -rb->halfLengthY(), rb->halfLengthY(),
-        //                         Acts::open, Acts::AxisDirection::AxisY);
-        //   sensorSurface->assignSurfaceMaterial(
-        //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-        //   ACTS_DEBUG("PXD sensor material assigned: hX=" << rb->halfLengthX()
-        //             << " hY=" << rb->halfLengthY());
-        // } else {
-        //   ACTS_WARNING("PXD sensor NO material assigned — bounds type="
-        //               << sensorSurface->bounds().type());
-        // }
-
 
         sVector.push_back(tgElementFront->surface().getSharedPtr());
       }
@@ -1113,9 +1055,11 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildLayers(
                     &surf->bounds());
             if (polyBounds != nullptr) {
               const auto& bbox = polyBounds->boundingBox();
-              Acts::BinUtility bu(15, -1, 1,
+              double hX = bbox.halfLengthX();
+              double hY = bbox.halfLengthY();
+              Acts::BinUtility bu(30, -hX, hX,
                                   Acts::open, Acts::AxisDirection::AxisX);
-              bu += Acts::BinUtility(15, -1, 1,
+              bu += Acts::BinUtility(30, -hY, hY,
                                      Acts::open, Acts::AxisDirection::AxisY);
               surf->assignSurfaceMaterial(
                   std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
