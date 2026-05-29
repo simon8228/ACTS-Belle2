@@ -17,7 +17,7 @@ using namespace std ;
 
 /// Function used to make ratio plot.
 
-void Draw_ratio(TCanvas* c, TProfile* h1, TProfile* h2, TLegend* leg, std::string name, double ratioMin = 0.5, double ratioMax = 1.1){
+void Draw_ratio(TCanvas* c, TProfile* h1, TProfile* h2, TLegend* leg, std::string name, double ratioMin = 0.5, double ratioMax = 1.1, std::string suffix = ""){
 
   // Upper plot will be in pad1
   TPad *pad1 = new TPad("pad1", "pad1", 0, 0.3, 1, 1.0);
@@ -84,7 +84,7 @@ void Draw_ratio(TCanvas* c, TProfile* h1, TProfile* h2, TLegend* leg, std::strin
 
   std::string name_axis = h1->GetXaxis()->GetTitle();
 
-  c->Print( (name+"/Ratio_Val_geant_mat_X0_"+name_axis+".pdf").c_str());
+  c->Print( (name+"/Ratio_Val_geant_mat_X0_"+name_axis+suffix+".pdf").c_str());
 
   delete h5;
 
@@ -132,7 +132,7 @@ void UpdateLabelPositions(std::vector<TLatex*>& labels,
 /// Draw the ammont of material (in X0) encounter by tracks as function of eta and phi.
 /// Plot the ratio between the two set to help identify inconsistency.
 
-void Mat_map(std::string Val = "", std::string geantino = "", std::string name = "", double ratioMin = 0.5, double ratioMax = 1.1){
+void Mat_map(std::string Val = "", std::string geantino = "", std::string name = "", double ratioMin = 0.5, double ratioMax = 1.1, double ratioMin2 = 0.8, double ratioMax2 = 1.2){
 
   gStyle->SetOptStat(0);
   gStyle->SetOptTitle(0);
@@ -160,7 +160,8 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
   // Label positions are set per-canvas by UpdateLabelPositions() after Draw().
   const double kDeg = TMath::Pi() / 180.0;
   const double kLineR = 3000.0;
-  const std::vector<int> kThetaAngles = {10, 20, 40, 70, 110, 140, 160, 170};
+  // const std::vector<int> kThetaAngles = {10, 20, 40, 70, 110, 140, 160, 170};
+  const std::vector<int> kThetaAngles = {15, 20, 150, 155};
   std::vector<TLine*> theta_lines;
   std::vector<TLatex*> theta_labels;
   for (int th : kThetaAngles) {
@@ -367,6 +368,17 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
     geantino_X0_Eta->SetLineColor(kRed);
 
     Draw_ratio(Comp_Eta, geantino_X0_Eta, Val_X0_Eta, leg, name, ratioMin, ratioMax);
+
+    // X0 ratio plot as function of theta — zoomed range
+    TCanvas *Comp_Eta_zoom = new TCanvas("Comp_Eta_zoom","Ratio geantino_Validation Theta zoom") ;
+    Val_X0_Eta->SetMarkerStyle(7);
+    geantino_X0_Eta->SetMarkerStyle(7);
+    Val_X0_Eta->SetMarkerColor(kBlack);
+    geantino_X0_Eta->SetMarkerColor(kRed);
+    Val_X0_Eta->SetLineColor(kBlack);
+    geantino_X0_Eta->SetLineColor(kRed);
+
+    Draw_ratio(Comp_Eta_zoom, geantino_X0_Eta, Val_X0_Eta, leg, name, ratioMin2, ratioMax2, "_zoom");
 
     // X0 ratio plot as function of phi of the Validation and Geantino input
     TCanvas *Comp_Phi = new TCanvas("Comp_Phi","Ratio geantino_Validation Phi") ;
