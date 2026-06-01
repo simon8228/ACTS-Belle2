@@ -170,7 +170,7 @@ Gen3Belle2Builder::buildTrackingGeometry(
   using enum Acts::CylinderVolumeBounds::Face;
   ACTS_INFO("Belle2 construction in  Gen3 mode");
 
-  TGeoManager::Import("/home/configs/Belle2_Beampipe_PXD_SVD.root");  // set realpath later
+  TGeoManager::Import("/home/configs/Belle2_CDC.root");  // set realpath later
   std::string cdcFile = "wireInfo.csv";
 
   Blueprint::Config cfg;
@@ -192,10 +192,10 @@ Gen3Belle2Builder::buildTrackingGeometry(
     m_beamPipeMaterial)); bpMat.addStaticVolume(std::move(beampipe));
     });
     */
-    buildBeamPipe(detector, gctx);
-    buildPXD(detector, gctx);
-    buildSVD(detector, gctx);
-    //buildCDC(detector, gctx);
+    // buildBeamPipe(detector, gctx);
+    // buildPXD(detector, gctx);
+    // buildSVD(detector, gctx);
+    buildCDC(detector, gctx);
   });
 
   if (graphvizFile) {
@@ -235,19 +235,6 @@ void Gen3Belle2Builder::buildCDC(Acts::Experimental::BlueprintNode& parent,
     using enum Acts::AxisDirection;
     using enum Acts::AxisBoundaryType;
 
-    matNode.configureFace(
-        Face::OuterCylinder,
-        Acts::DirectedProtoAxis(AxisRPhi, Closed, -M_PI, M_PI, 120),
-        Acts::DirectedProtoAxis(AxisZ, Open, -3000_mm, 3000_mm, 100));
-    /*
-    matNode.configureFace(Face::NegativeDisc,
-        Acts::DirectedProtoAxis(AxisR, Open, 150_mm, 3000_mm, 8),
-        Acts::DirectedProtoAxis(AxisPhi, Closed, -M_PI, M_PI, 8));
-
-    matNode.configureFace(Face::PositiveDisc,
-        Acts::DirectedProtoAxis(AxisR, Open, 150_mm, 3000_mm, 8),
-        Acts::DirectedProtoAxis(AxisPhi, Closed, -M_PI, M_PI, 8));
-    */
     matNode.addStaticVolume(
         Acts::Transform3::Identity(), cdcBounds, "CDC_Container",
         [&](auto& cdcVol) {
@@ -260,52 +247,58 @@ void Gen3Belle2Builder::buildCDC(Acts::Experimental::BlueprintNode& parent,
                   Acts::ExtentEnvelope{{.z = {5_mm, 5_mm}, .r = {0_mm, 0_mm}}});
               layer.setNavigationPolicyFactory(createNavigationPolicy2());
             });
-          }/*
-          cdcVol.addLayer("cdc_suppLayer3", [&](auto& suppLayer) {
-            auto bounds = std::make_shared<Acts::CylinderBounds>(200_mm, 3000);
-            auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(
-                Acts::Transform3::Identity(), bounds);
-            Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-                                Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(300, -3000, 3000, Acts::open,
-                                   Acts::AxisDirection::AxisZ);
-            surf->assignSurfaceMaterial(
-                std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-            Acts::MutableProtoLayer pl(gctx, {surf});
-            suppLayer.setProtoLayer(pl);
-            suppLayer.setEnvelope(
-                Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-          });*/
-          /*
-          std::string suppName = name + "_Support";
-            cdcVol.addLayer(suppName, [&](auto& suppLayer) {
-              double layerRadius =
-                  cdcLayers[i].protoLayer.medium(Acts::AxisDirection::AxisR) -
-                  2_mm;
+          }
+          // cdcVol.addLayer("cdc_suppLayer1", [&](auto& suppLayer) {
+          //   auto bounds = std::make_shared<Acts::CylinderBounds>(200_mm, 3000);
+          //   auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(
+          //       Acts::Transform3::Identity(), bounds);
+          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
+          //                       Acts::AxisDirection::AxisPhi);
+          //   bu += Acts::BinUtility(300, -3000, 3000, Acts::open,
+          //                          Acts::AxisDirection::AxisZ);
+          //   surf->assignSurfaceMaterial(
+          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+          //   Acts::MutableProtoLayer pl(gctx, {surf});
+          //   suppLayer.setProtoLayer(pl);
+          //   suppLayer.setEnvelope(
+          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
+          // });
+          // cdcVol.addLayer("cdc_suppLayer2", [&](auto& suppLayer) {
+          //   Acts::Transform3 t = Acts::Transform3::Identity();
+          //   t.translation() = Acts::Vector3(0, 0, -350_mm);
+          //   auto bounds = std::make_shared<Acts::CylinderBounds>(800_mm, 350);
+          //   auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
+          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
+          //                       Acts::AxisDirection::AxisPhi);
+          //   bu += Acts::BinUtility(50, -350, 350, Acts::open,
+          //                          Acts::AxisDirection::AxisZ);
+          //   surf->assignSurfaceMaterial(
+          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+          //   Acts::MutableProtoLayer pl(gctx, {surf});
+          //   suppLayer.setProtoLayer(pl);
+          //   suppLayer.setEnvelope(
+          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
+          // });
+          // cdcVol.addLayer("CDC_SuppDisk1", [&](auto& layer) {
+          //   double discZ = -700.0_mm;
+          //   auto bounds =
+          //       std::make_shared<Acts::RadialBounds>(200.0_mm, 1200.0_mm);
+          //   auto transform = Acts::Transform3(Acts::Translation3(0, 0, discZ));
+          //   auto surf =
+          //       Acts::Surface::makeShared<Acts::DiscSurface>(transform, bounds);
 
-              auto cylBounds = std::make_shared<Acts::CylinderBounds>(
-                  layerRadius, 1500_mm);
-              auto cylSurf = Acts::Surface::makeShared<Acts::CylinderSurface>(
-                  Acts::Transform3::Identity(), cylBounds);
+          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
+          //                       Acts::AxisDirection::AxisPhi);
+          //   bu += Acts::BinUtility(100, 200.0_mm, 1200.0_mm, Acts::open,
+          //                          Acts::AxisDirection::AxisR);
+          //   surf->assignSurfaceMaterial(
+          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
 
-              Acts::BinUtility bu(120, -M_PI, M_PI, Acts::open,
-                                  Acts::AxisDirection::AxisPhi);
-              bu += Acts::BinUtility(100, -1500_mm, 1500_mm, Acts::open,
-                                     Acts::AxisDirection::AxisZ);
-              cylSurf->assignSurfaceMaterial(
-                  std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-
-              std::vector<std::shared_ptr<Acts::Surface>> passiveSurfaces = {
-                  cylSurf};
-              Acts::MutableProtoLayer pl(gctx, passiveSurfaces);
-
-              suppLayer.setProtoLayer(pl);
-              suppLayer.setEnvelope(
-                  Acts::ExtentEnvelope{{.z = {2_mm, 2_mm}, .r = {2_mm,
-          2_mm}}});
-
-              suppLayer.setNavigationPolicyFactory(createNavigationPolicy2());
-            });*/
+          //   Acts::MutableProtoLayer pl(gctx, {surf});
+          //   layer.setProtoLayer(pl);
+          //   layer.setEnvelope(
+          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {0_mm, 0_mm}}});
+          // });
 
           cdcVol.setNavigationPolicyFactory(createNavigationPolicy2());
         });
@@ -411,17 +404,39 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildCDCLayers(
     auto wireElement =
         std::make_shared<CDCWireElement>(geoId, transform, bounds, 1.0);
     wireElement->surface().assignGeometryId(geoId);
-    // wireElement->surface().assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>());
 
     surfacesByLayer[layerIndex].push_back(
         wireElement->surface().getSharedPtr());
     m_cdcElementStore.push_back(wireElement);
   }
 
+  // CDC gas mixture (He 50% + C2H6 50%): X0~280mm, L0~617mm, A~9.4, Z~4.8
+  // rho~1.24e-3 g/cm3. One passive cylinder per wire layer carries the
+  // material so the mapper only intersects 56 surfaces instead of ~15k.
+  static const Acts::Material cdcGas = Acts::Material::fromMassDensity(
+      280.f, 617.f, 9.4f, 4.8f,
+      1.24e-3f * Acts::UnitConstants::g / Acts::UnitConstants::cm3);
+
   for (auto const& [layerIdx, surfaces] : surfacesByLayer) {
     ACTS_DEBUG("- Custom CSV Drift Chamber loaded. Found "
                << surfaces.size() << " wires for CDC layer " << layerIdx);
-    fillLayer(surfaces);
+
+    // Derive layer geometry from the wire surface positions.
+    Acts::MutableProtoLayer probe(gctx, surfaces);
+    double layerR   = probe.medium(Acts::AxisDirection::AxisR);
+    double halfZ    = 0.5 * probe.range(Acts::AxisDirection::AxisZ);
+    double cellRadW = probe.range(Acts::AxisDirection::AxisR);
+
+    auto cylBounds = std::make_shared<Acts::CylinderBounds>(layerR, halfZ);
+    auto passiveSurf = Acts::Surface::makeShared<Acts::CylinderSurface>(
+        Acts::Transform3::Identity(), cylBounds);
+    passiveSurf->assignSurfaceMaterial(
+        std::make_shared<Acts::HomogeneousSurfaceMaterial>(
+            Acts::MaterialSlab(cdcGas, static_cast<float>(cellRadW))));
+
+    auto layerSurfaces = surfaces;
+    layerSurfaces.push_back(passiveSurf);
+    fillLayer(layerSurfaces);
   }
 
   return cpLayers;
@@ -806,29 +821,14 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
     matNode.addStaticVolume(
         Acts::Transform3::Identity(), svdBounds, "SVD_Container",
         [&](auto& svdVol) {
-          // svdVol.addLayer("SVD_suppLayer1", [&](auto& suppLayer) {
-          //   auto bounds = std::make_shared<Acts::CylinderBounds>(35_mm, 250);
-          //   auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(
-          //       Acts::Transform3::Identity(), bounds);
-          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-          //                       Acts::AxisDirection::AxisPhi);
-          //   bu += Acts::BinUtility(125, -250, 250, Acts::open,
-          //                          Acts::AxisDirection::AxisZ);
-          //   surf->assignSurfaceMaterial(
-          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-          //   Acts::MutableProtoLayer pl(gctx, {surf});
-          //   suppLayer.setProtoLayer(pl);
-          //   suppLayer.setEnvelope(
-          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-          // });
-          svdVol.addLayer("SVD_suppLayer2", [&](auto& suppLayer) {
+          svdVol.addLayer("SVD_suppLayer1", [&](auto& suppLayer) {
             Acts::Transform3 t = Acts::Transform3::Identity();
             t.translation() = Acts::Vector3(0, 0, 50_mm);
             auto bounds = std::make_shared<Acts::CylinderBounds>(50_mm, 250);
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
                                 Acts::AxisDirection::AxisPhi);
-            bu += Acts::BinUtility(125, -250, 250, Acts::open,
+            bu += Acts::BinUtility(250, -250, 250, Acts::open,
                                    Acts::AxisDirection::AxisZ);
             surf->assignSurfaceMaterial(
                 std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
@@ -837,7 +837,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
             suppLayer.setEnvelope(
                 Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
           });
-          svdVol.addLayer("SVD_suppLayer3", [&](auto& suppLayer) {
+          svdVol.addLayer("SVD_suppLayer2", [&](auto& suppLayer) {
             Acts::Transform3 t = Acts::Transform3::Identity();
             t.translation() = Acts::Vector3(0, 0, 30_mm);
             auto bounds = std::make_shared<Acts::CylinderBounds>(110_mm, 150);
@@ -853,7 +853,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
             suppLayer.setEnvelope(
                 Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
           });
-          svdVol.addLayer("SVD_suppLayer4", [&](auto& suppLayer) {
+          svdVol.addLayer("SVD_suppLayer3", [&](auto& suppLayer) {
             Acts::Transform3 t = Acts::Transform3::Identity();
             t.translation() = Acts::Vector3(0, 0, 100_mm);
             auto bounds = std::make_shared<Acts::CylinderBounds>(155_mm, 500);
@@ -1077,6 +1077,17 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildLayers(
                                      Acts::open, Acts::AxisDirection::AxisY);
               surf->assignSurfaceMaterial(
                   std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+              
+              // Sanity check: all vertices must fall within the bin range
+              for (const auto& vtx : polyBounds->vertices()) {
+                  if (vtx.x() < bbox.min().x() || vtx.x() > bbox.max().x() ||
+                      vtx.y() < bbox.min().y() || vtx.y() > bbox.max().y()) {
+                      ACTS_ERROR("ConvexPolygon vertex (" << vtx.x() << ", " << vtx.y()
+                                << ") lies OUTSIDE the bin grid!");
+                  }
+              }
+              ACTS_INFO("ConvexPolygon bbox: x=[" << bbox.min().x() << ", " << bbox.max().x()
+                        << "] y=[" << bbox.min().y() << ", " << bbox.max().y() << "]");
             }
             ACTS_INFO("Sensor: ConvexPolygon - assigned ProtoSurfaceMaterial");
           } else {

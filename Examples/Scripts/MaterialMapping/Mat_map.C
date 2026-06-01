@@ -160,8 +160,8 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
   // Label positions are set per-canvas by UpdateLabelPositions() after Draw().
   const double kDeg = TMath::Pi() / 180.0;
   const double kLineR = 3000.0;
-  // const std::vector<int> kThetaAngles = {10, 20, 40, 70, 110, 140, 160, 170};
-  const std::vector<int> kThetaAngles = {15, 20, 150, 155};
+  const std::vector<int> kThetaAngles = {10, 20, 40, 70, 110, 140, 160, 170};
+  // const std::vector<int> kThetaAngles = {15, 20, 150, 155};
   std::vector<TLine*> theta_lines;
   std::vector<TLatex*> theta_labels;
   for (int th : kThetaAngles) {

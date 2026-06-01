@@ -18,6 +18,7 @@
 #include "Acts/Utilities/AxisDefinitions.hpp"
 #include "Acts/Utilities/BinUtility.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 namespace Acts {
@@ -230,17 +231,51 @@ static inline BinUtility adjustBinUtility(const BinUtility& bu,
 /// @brief adjust the BinUtility bu to the dimensions of convex polygon bounds
 ///
 /// @param bu BinUtility at source
-/// @param cpBounds the ConvexPolygonBounds to adjust to (uses bounding box)
+/// @param cpBounds the ConvexPolygonBounds to adjust to
 /// @param transform Transform for the adjusted @c BinUtility
 ///
 /// @return new updated BinUtility
 static inline BinUtility adjustBinUtility(const BinUtility& bu,
                                           const ConvexPolygonBoundsBase& cpBounds,
                                           const Transform3& transform) {
-  // Delegate to the RectangleBounds overload using the polygon's bounding box.
-  // ConvexPolygonBoundsBase::boundingBox() returns the tightest enclosing
-  // RectangleBounds in local (X, Y) coordinates.
-  return adjustBinUtility(bu, cpBounds.boundingBox(), transform);
+  BinUtility uBinUtil(transform);
+
+  // Compute the axis-aligned bounding box from the polygon vertices directly
+  // in the surface's local frame. This correctly handles polygons whose edges
+  // are not aligned with the local X/Y axes (e.g. tilted sensors).
+  const std::vector<Vector2> verts = cpBounds.vertices();
+
+  double minX = std::numeric_limits<double>::max();
+  double maxX = std::numeric_limits<double>::lowest();
+  double minY = std::numeric_limits<double>::max();
+  double maxY = std::numeric_limits<double>::lowest();
+
+  for (const Vector2& v : verts) {
+    minX = std::min(minX, v.x());
+    maxX = std::max(maxX, v.x());
+    minY = std::min(minY, v.y());
+    maxY = std::max(maxY, v.y());
+  }
+
+  const std::vector<BinningData>& bData = bu.binningData();
+  for (const auto& bd : bData) {
+    AxisDirection bval = bd.binvalue;
+    if (bd.type == arbitrary) {
+      throw std::invalid_argument("Arbitrary binning can not be adjusted.");
+    } else if (bval != AxisDirection::AxisX && bval != AxisDirection::AxisY) {
+      throw std::invalid_argument("ConvexPolygon binning must be: x, y.");
+    }
+    float min = 0., max = 0.;
+    if (bval == AxisDirection::AxisX) {
+      min = minX;
+      max = maxX;
+    } else {
+      min = minY;
+      max = maxY;
+    }
+    uBinUtil += BinUtility(BinningData(bd.option, bval, bd.bins(), min, max));
+  }
+  return uBinUtil;
 }
 
 /// @brief adjust the BinUtility bu to a surface
