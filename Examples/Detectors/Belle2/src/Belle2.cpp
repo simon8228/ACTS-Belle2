@@ -170,7 +170,7 @@ Gen3Belle2Builder::buildTrackingGeometry(
   using enum Acts::CylinderVolumeBounds::Face;
   ACTS_INFO("Belle2 construction in  Gen3 mode");
 
-  TGeoManager::Import("/home/configs/Belle2_CDC.root");  // set realpath later
+  TGeoManager::Import("/home/configs/Belle2_Beampipe_PXD_SVD_CDC.root");  // set realpath later
   std::string cdcFile = "wireInfo.csv";
 
   Blueprint::Config cfg;
@@ -192,9 +192,9 @@ Gen3Belle2Builder::buildTrackingGeometry(
     m_beamPipeMaterial)); bpMat.addStaticVolume(std::move(beampipe));
     });
     */
-    // buildBeamPipe(detector, gctx);
-    // buildPXD(detector, gctx);
-    // buildSVD(detector, gctx);
+    buildBeamPipe(detector, gctx);
+    buildPXD(detector, gctx);
+    buildSVD(detector, gctx);
     buildCDC(detector, gctx);
   });
 
@@ -248,57 +248,47 @@ void Gen3Belle2Builder::buildCDC(Acts::Experimental::BlueprintNode& parent,
               layer.setNavigationPolicyFactory(createNavigationPolicy2());
             });
           }
-          // cdcVol.addLayer("cdc_suppLayer1", [&](auto& suppLayer) {
-          //   auto bounds = std::make_shared<Acts::CylinderBounds>(200_mm, 3000);
-          //   auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(
-          //       Acts::Transform3::Identity(), bounds);
-          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-          //                       Acts::AxisDirection::AxisPhi);
-          //   bu += Acts::BinUtility(300, -3000, 3000, Acts::open,
-          //                          Acts::AxisDirection::AxisZ);
-          //   surf->assignSurfaceMaterial(
-          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-          //   Acts::MutableProtoLayer pl(gctx, {surf});
-          //   suppLayer.setProtoLayer(pl);
-          //   suppLayer.setEnvelope(
-          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-          // });
-          // cdcVol.addLayer("cdc_suppLayer2", [&](auto& suppLayer) {
-          //   Acts::Transform3 t = Acts::Transform3::Identity();
-          //   t.translation() = Acts::Vector3(0, 0, -350_mm);
-          //   auto bounds = std::make_shared<Acts::CylinderBounds>(800_mm, 350);
-          //   auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
-          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-          //                       Acts::AxisDirection::AxisPhi);
-          //   bu += Acts::BinUtility(50, -350, 350, Acts::open,
-          //                          Acts::AxisDirection::AxisZ);
-          //   surf->assignSurfaceMaterial(
-          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-          //   Acts::MutableProtoLayer pl(gctx, {surf});
-          //   suppLayer.setProtoLayer(pl);
-          //   suppLayer.setEnvelope(
-          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-          // });
-          // cdcVol.addLayer("CDC_SuppDisk1", [&](auto& layer) {
-          //   double discZ = -700.0_mm;
-          //   auto bounds =
-          //       std::make_shared<Acts::RadialBounds>(200.0_mm, 1200.0_mm);
-          //   auto transform = Acts::Transform3(Acts::Translation3(0, 0, discZ));
-          //   auto surf =
-          //       Acts::Surface::makeShared<Acts::DiscSurface>(transform, bounds);
 
-          //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-          //                       Acts::AxisDirection::AxisPhi);
-          //   bu += Acts::BinUtility(100, 200.0_mm, 1200.0_mm, Acts::open,
-          //                          Acts::AxisDirection::AxisR);
-          //   surf->assignSurfaceMaterial(
-          //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+          cdcVol.addLayer("CDC_SuppDisk1", [&](auto& layer) {
+            double discZ = -700.0_mm;
+            auto bounds =
+                std::make_shared<Acts::RadialBounds>(200.0_mm, 1200.0_mm);
+            auto transform = Acts::Transform3(Acts::Translation3(0, 0, discZ));
+            auto surf =
+                Acts::Surface::makeShared<Acts::DiscSurface>(transform, bounds);
 
-          //   Acts::MutableProtoLayer pl(gctx, {surf});
-          //   layer.setProtoLayer(pl);
-          //   layer.setEnvelope(
-          //       Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {0_mm, 0_mm}}});
-          // });
+            Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
+                                Acts::AxisDirection::AxisPhi);
+            bu += Acts::BinUtility(150, 200.0_mm, 1200.0_mm, Acts::open,
+                                   Acts::AxisDirection::AxisR);
+            surf->assignSurfaceMaterial(
+                std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+
+            Acts::MutableProtoLayer pl(gctx, {surf});
+            layer.setProtoLayer(pl);
+            layer.setEnvelope(
+                Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {0_mm, 0_mm}}});
+          });
+          cdcVol.addLayer("CDC_SuppDisk3", [&](auto& layer) {
+            double discZ = 1500.0_mm;
+            auto bounds =
+                std::make_shared<Acts::RadialBounds>(300.0_mm, 1200.0_mm);
+            auto transform = Acts::Transform3(Acts::Translation3(0, 0, discZ));
+            auto surf =
+                Acts::Surface::makeShared<Acts::DiscSurface>(transform, bounds);
+
+            Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
+                                Acts::AxisDirection::AxisPhi);
+            bu += Acts::BinUtility(200, 400.0_mm, 1200.0_mm, Acts::open,
+                                   Acts::AxisDirection::AxisR);
+            surf->assignSurfaceMaterial(
+                std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+
+            Acts::MutableProtoLayer pl(gctx, {surf});
+            layer.setProtoLayer(pl);
+            layer.setEnvelope(
+                Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {0_mm, 0_mm}}});
+          });
 
           cdcVol.setNavigationPolicyFactory(createNavigationPolicy2());
         });
@@ -332,8 +322,6 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildCDCLayers(
         ProtoLayerSurfaces pls{std::move(pl), sVector, nb0, nb1};
         cpLayers.push_back(std::move(pls));
       };
-
-  std::vector<int> superLayers = {0, 1, 2, 3, 4, 5, 6, 7};
 
   std::map<unsigned int, std::vector<std::shared_ptr<Acts::Surface>>>
       surfacesByLayer;
@@ -410,29 +398,27 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildCDCLayers(
     m_cdcElementStore.push_back(wireElement);
   }
 
-  // CDC gas mixture (He 50% + C2H6 50%): X0~280mm, L0~617mm, A~9.4, Z~4.8
-  // rho~1.24e-3 g/cm3. One passive cylinder per wire layer carries the
-  // material so the mapper only intersects 56 surfaces instead of ~15k.
-  static const Acts::Material cdcGas = Acts::Material::fromMassDensity(
-      280.f, 617.f, 9.4f, 4.8f,
-      1.24e-3f * Acts::UnitConstants::g / Acts::UnitConstants::cm3);
-
   for (auto const& [layerIdx, surfaces] : surfacesByLayer) {
     ACTS_DEBUG("- Custom CSV Drift Chamber loaded. Found "
-               << surfaces.size() << " wires for CDC layer " << layerIdx);
+              << surfaces.size() << " wires for CDC layer " << layerIdx);
 
-    // Derive layer geometry from the wire surface positions.
     Acts::MutableProtoLayer probe(gctx, surfaces);
-    double layerR   = probe.medium(Acts::AxisDirection::AxisR);
-    double halfZ    = 0.5 * probe.range(Acts::AxisDirection::AxisZ);
-    double cellRadW = probe.range(Acts::AxisDirection::AxisR);
+    double layerR  = probe.medium(Acts::AxisDirection::AxisR);
+    double layerCz = probe.medium(Acts::AxisDirection::AxisZ);
+    double halfZ   = 0.5 * probe.range(Acts::AxisDirection::AxisZ);
 
     auto cylBounds = std::make_shared<Acts::CylinderBounds>(layerR, halfZ);
+    Acts::Transform3 cylTransform = Acts::Transform3::Identity();
+    cylTransform.translation() = Acts::Vector3(0, 0, layerCz);
     auto passiveSurf = Acts::Surface::makeShared<Acts::CylinderSurface>(
-        Acts::Transform3::Identity(), cylBounds);
+        cylTransform, cylBounds);
+
+    Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
+                        Acts::AxisDirection::AxisPhi);
+    bu += Acts::BinUtility(350, -halfZ, halfZ, Acts::open,
+                           Acts::AxisDirection::AxisZ);
     passiveSurf->assignSurfaceMaterial(
-        std::make_shared<Acts::HomogeneousSurfaceMaterial>(
-            Acts::MaterialSlab(cdcGas, static_cast<float>(cellRadW))));
+        std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
 
     auto layerSurfaces = surfaces;
     layerSurfaces.push_back(passiveSurf);
