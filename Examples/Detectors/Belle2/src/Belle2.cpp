@@ -170,7 +170,7 @@ Gen3Belle2Builder::buildTrackingGeometry(
   using enum Acts::CylinderVolumeBounds::Face;
   ACTS_INFO("Belle2 construction in  Gen3 mode");
 
-  TGeoManager::Import("/home/configs/Belle2_Beampipe_PXD_SVD_CDC.root");  // set realpath later
+  TGeoManager::Import("/home/configs/Belle2_Beampipe_PXD_SVD.root");
   std::string cdcFile = "wireInfo.csv";
 
   Blueprint::Config cfg;
@@ -193,7 +193,7 @@ Gen3Belle2Builder::buildTrackingGeometry(
     });
     */
     buildBeamPipe(detector, gctx);
-    buildPXD(detector, gctx);
+    // buildPXD(detector, gctx);
     buildSVD(detector, gctx);
     buildCDC(detector, gctx);
   });
@@ -269,7 +269,7 @@ void Gen3Belle2Builder::buildCDC(Acts::Experimental::BlueprintNode& parent,
             layer.setEnvelope(
                 Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {0_mm, 0_mm}}});
           });
-          cdcVol.addLayer("CDC_SuppDisk3", [&](auto& layer) {
+          cdcVol.addLayer("CDC_SuppDisk2", [&](auto& layer) {
             double discZ = 1500.0_mm;
             auto bounds =
                 std::make_shared<Acts::RadialBounds>(300.0_mm, 1200.0_mm);
