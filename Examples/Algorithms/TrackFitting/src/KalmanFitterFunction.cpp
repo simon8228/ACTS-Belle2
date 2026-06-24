@@ -81,6 +81,7 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
 
   bool multipleScattering = false;
   bool energyLoss = false;
+  bool useDirectNavigator = false;
   Acts::FreeToBoundCorrection freeToBoundCorrection;
 
   IndexSourceLink::SurfaceAccessor slSurfaceAccessor;
@@ -139,6 +140,25 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
                                const MeasurementCalibratorAdapter& calibrator,
                                TrackContainer& tracks) const override {
     const auto kfOptions = makeKfOptions(options, calibrator);
+    if (useDirectNavigator) {
+      std::vector<const Acts::Surface*> surfaceSequence;
+      surfaceSequence.reserve(sourceLinks.size());
+      for (const auto& sl : sourceLinks) {
+        const auto* surf = slSurfaceAccessor(sl);
+        if (surf != nullptr) {
+          surfaceSequence.push_back(surf);
+        }
+      }
+      // Sort surfaces in propagation order (increasing layer = inner→outer)
+      // so the DirectNavigator steps monotonically along the track.
+      std::sort(surfaceSequence.begin(), surfaceSequence.end(),
+                [](const Acts::Surface* a, const Acts::Surface* b) {
+                  return a->geometryId().layer() < b->geometryId().layer();
+                });
+      return directFitter.fit(sourceLinks.begin(), sourceLinks.end(),
+                              initialParameters, kfOptions, surfaceSequence,
+                              tracks);
+    }
     return fitter.fit(sourceLinks.begin(), sourceLinks.end(), initialParameters,
                       kfOptions, tracks);
   }
@@ -166,6 +186,7 @@ std::shared_ptr<TrackFitterFunction> ActsExamples::makeKalmanFitterFunction(
     double reverseFilteringMomThreshold,
     double reverseFilteringCovarianceScaling,
     Acts::FreeToBoundCorrection freeToBoundCorrection, double chi2Cut,
+    bool useDirectNavigator,
     const Acts::Logger& logger) {
   // Stepper should be copied into the fitters
   const Stepper stepper(std::move(magneticField));
@@ -194,6 +215,7 @@ std::shared_ptr<TrackFitterFunction> ActsExamples::makeKalmanFitterFunction(
       std::move(trackFitter), std::move(directTrackFitter), geo);
   fitterFunction->multipleScattering = multipleScattering;
   fitterFunction->energyLoss = energyLoss;
+  fitterFunction->useDirectNavigator = useDirectNavigator;
   fitterFunction->reverseFilteringLogic.momentumThreshold =
       reverseFilteringMomThreshold;
   fitterFunction->freeToBoundCorrection = freeToBoundCorrection;

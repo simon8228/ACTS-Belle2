@@ -49,6 +49,8 @@ class TrackFittingAlgorithm final : public IAlgorithm {
     /// Forward-link all tracks after fitting, enabling inside-out track state
     /// iteration via TrackProxy::trackStates(). Off by default.
     bool linkForward = false;
+    /// Maximum number of propagation steps per track.
+    unsigned int maxSteps = 5000;
   };
 
   /// Constructor of the fitting algorithm

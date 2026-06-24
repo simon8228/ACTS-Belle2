@@ -45,7 +45,7 @@ def runMaterialValidation(
         ParticleConfig(
             num=tracksPerEvent, pdg=acts.PdgParticle.eMuon, randomizeCharge=True
         ),
-        EtaConfig(*etaRange),
+        EtaConfig(etaRange[0], etaRange[1], True),
         PhiConfig(*phiRange),
         rnd=rnd,
     )

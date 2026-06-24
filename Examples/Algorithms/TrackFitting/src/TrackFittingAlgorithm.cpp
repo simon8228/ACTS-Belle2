@@ -95,12 +95,14 @@ ProcessCode TrackFittingAlgorithm::execute(const AlgorithmContext& ctx) const {
   MeasurementCalibratorAdapter calibrator(*(m_cfg.calibrator), measurements,
                                           clusters);
 
+  Acts::PropagatorPlainOptions propOptions(ctx.geoContext, ctx.magFieldContext);
+  propOptions.maxSteps = m_cfg.maxSteps;
   TrackFitterFunction::GeneralFitterOptions options{
       ctx.geoContext,
       ctx.magFieldContext,
       ctx.calibContext,
       pSurface.get(),
-      Acts::PropagatorPlainOptions(ctx.geoContext, ctx.magFieldContext),
+      propOptions,
       false};
 
   auto trackContainer = std::make_shared<Acts::VectorTrackContainer>();

@@ -1,15 +1,17 @@
 #include "Acts/Geometry/GeometryIdentifier.hpp"
 #include "Acts/Surfaces/Surface.hpp"
+#include "ActsExamples/Belle2/CDCWireElement.hpp"
 #include "ActsPlugins/Root/TGeoDetectorElement.hpp"
 #include <map>
 
 
 struct MyIdentifierHook: public Acts::GeometryIdentifierHook {
 
-    // Maps SVD layer number to the volume ID used in the CSV encoding
+    // Maps VXD layer number to the volume ID used in the CSV encoding
     // (must match LAYER_TO_ADDRESS in finding_basf2_cluster_true.py)
-    static constexpr std::array<std::pair<int,int>, 4> kLayerToVolume = {{
-        {3, 17}, {4, 18}, {5, 19}, {6, 20}
+    // PXD: layers 1-2 → volumes 15-16; SVD: layers 3-6 → volumes 17-20
+    static constexpr std::array<std::pair<int,int>, 6> kLayerToVolume = {{
+        {1, 15}, {2, 16}, {3, 17}, {4, 18}, {5, 19}, {6, 20}
     }};
 
     Acts::GeometryIdentifier decorateIdentifier(
@@ -18,16 +20,20 @@ struct MyIdentifierHook: public Acts::GeometryIdentifierHook {
 
         const Acts::SurfacePlacementBase* detElem = surface.surfacePlacement();
         if (detElem) {
+            // CDC wires: restore the pre-set identifier (volume=14, layer=ICLayer+1,
+            // sensitive=IWire+1) that Blueprint overwrites with sequential IDs.
+            auto cdcElem = dynamic_cast<const CDCWireElement*>(detElem);
+            if (cdcElem) {
+                return cdcElem->identifier();
+            }
+
+            // VXD (PXD/SVD) sensors: set volume from LAYER_TO_ADDRESS, sensitive = VxdID.
             auto tgeoElem = dynamic_cast<const ActsPlugins::TGeoDetectorElement*>(detElem);
             if (tgeoElem) {
-                // tgeoID is the VxdID-encoded value: (layer<<13)|(ladder<<8)|(sensor<<5)
-                // set by MyIdentifierProvider::identify()
                 auto vxdId = static_cast<Acts::GeometryIdentifier::Value>(tgeoElem->identifier());
-                int svdLayer = (vxdId >> 13) & 0x7;
+                int vxdLayer = (vxdId >> 13) & 0x7;
                 for (auto [layer, vol] : kLayerToVolume) {
-                    if (layer == svdLayer) {
-                        // Build the full geometry ID to match the CSV encoding:
-                        // volume from LAYER_TO_ADDRESS, sensitive = VxdID value
+                    if (layer == vxdLayer) {
                         return Acts::GeometryIdentifier{}
                             .withVolume(vol)
                             .withSensitive(vxdId);

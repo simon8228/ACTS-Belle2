@@ -37,7 +37,7 @@ void addTrackFitting(py::module& mex) {
   ACTS_PYTHON_DECLARE_ALGORITHM(
       TrackFittingAlgorithm, mex, "TrackFittingAlgorithm", inputMeasurements,
       inputProtoTracks, inputInitialTrackParameters, inputClusters,
-      outputTracks, fit, pickTrack, calibrator, linkForward);
+      outputTracks, fit, pickTrack, calibrator, linkForward, maxSteps);
 
   ACTS_PYTHON_DECLARE_ALGORITHM(RefittingAlgorithm, mex, "RefittingAlgorithm",
                                 inputTracks, outputTracks, fit, pickTrack,
@@ -55,17 +55,19 @@ void addTrackFitting(py::module& mex) {
            double reverseFilteringMomThreshold,
            double reverseFilteringCovarianceScaling,
            FreeToBoundCorrection freeToBoundCorrection, double chi2Cut,
+           bool useDirectNavigator,
            Logging::Level level) {
           return makeKalmanFitterFunction(
               std::move(trackingGeometry), std::move(magneticField),
               multipleScattering, energyLoss, reverseFilteringMomThreshold,
               reverseFilteringCovarianceScaling, freeToBoundCorrection, chi2Cut,
+              useDirectNavigator,
               *getDefaultLogger("Kalman", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
         "energyLoss"_a, "reverseFilteringMomThreshold"_a,
         "reverseFilteringCovarianceScaling"_a, "freeToBoundCorrection"_a,
-        "chi2Cut"_a, "level"_a);
+        "chi2Cut"_a, "useDirectNavigator"_a = false, "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(
         mex, "MeasurementCalibrator");
