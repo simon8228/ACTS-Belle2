@@ -9,8 +9,8 @@
 #pragma once
 
 #include "Acts/Utilities/Logger.hpp"
-#include "ActsExamples/DetectorCommons/Detector.hpp"
 #include "ActsExamples/Belle2/ProtoLayerCreator.hpp"
+#include "ActsExamples/DetectorCommons/Detector.hpp"
 
 #include <cstddef>
 #include <filesystem>
@@ -26,25 +26,25 @@ namespace ActsExamples {
 class Belle2Element;
 
 class Belle2 : public Detector {
-  public:
-	struct Config {
-		std::size_t buildLevel = 3;
-		Acts::Logging::Level logLevel = Acts::Logging::VERBOSE;
-		Acts::Logging::Level surfaceLogLevel = Acts::Logging::VERBOSE;
-		Acts::Logging::Level layerLogLevel = Acts::Logging::VERBOSE;
-		Acts::Logging::Level volumeLogLevel = Acts::Logging::VERBOSE;
-		bool buildProto = false;
-		std::shared_ptr<const Acts::IMaterialDecorator> materialDecorator;
-		bool gen3 = true;
-		std::optional<std::filesystem::path> graphvizFile = "./belle2_graphviz.dot";
-	};
+ public:
+  struct Config {
+    std::size_t buildLevel = 3;
+    Acts::Logging::Level logLevel = Acts::Logging::DEBUG;
+    Acts::Logging::Level surfaceLogLevel = Acts::Logging::DEBUG;
+    Acts::Logging::Level layerLogLevel = Acts::Logging::DEBUG;
+    Acts::Logging::Level volumeLogLevel = Acts::Logging::DEBUG;
+    bool buildProto = false;
+    std::shared_ptr<const Acts::IMaterialDecorator> materialDecorator;
+    bool gen3 = true;
+    std::optional<std::filesystem::path> graphvizFile = "./belle2_graphviz.dot";
+  };
 
-	explicit Belle2(const Config& cfg);
+  explicit Belle2(const Config& cfg);
 
-  protected:
-	void buildTrackingGeometry(
-	    const B2::ProtoLayerCreator::ElementFactory& detectorElementFactory);
+ protected:
+  void buildTrackingGeometry(
+      const B2::ProtoLayerCreator::ElementFactory& detectorElementFactory);
 
-	Config m_cfg;
+  Config m_cfg;
 };
-} // namespace ActsExamples
+}  // namespace ActsExamples

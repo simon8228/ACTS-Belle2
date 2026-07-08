@@ -68,26 +68,22 @@ void ActsExamples::DriftChamberCalibrator::calibrate(
     trackState.setUncalibratedSourceLink(Acts::SourceLink{sourceLink});
     const IndexSourceLink& idxSourceLink = sourceLink.get<IndexSourceLink>();
 
-    // 1. Hole den dynamischen MeasurementProxy
     auto rawMeasurement = measurements.at(idxSourceLink.index());
-    
-    // 2. Kopiere die Daten in dynamische Eigen-Typen
+
     Eigen::VectorXd params = rawMeasurement.parameters();
     Eigen::MatrixXd cov = rawMeasurement.covariance();
     
-    // Fix 1: Die Indizes heißen in dieser Version 'subspaceIndexVector()'
     auto indices = rawMeasurement.subspaceIndexVector(); 
     
-    if (rawMeasurement.size() == 1) {
+    if (rawMeasurement.size() == 1 &&
+        trackState.referenceSurface().type() == Acts::Surface::Straw) {
         if (indices[0] == Acts::eBoundLoc0 && trackState.hasPredicted()) {
             double predictedLoc0 = trackState.predicted()[Acts::eBoundLoc0];
-            
             double absDrift = std::abs(params[0]);
             params[0] = (predictedLoc0 < 0.0) ? -absDrift : absDrift;
         }
     }
-    
-    // 3. Speicherplatz anhand der dynamischen Größe allokieren
+
     trackState.allocateCalibrated(rawMeasurement.size());
     
     trackState.setProjectorSubspaceIndices(indices);

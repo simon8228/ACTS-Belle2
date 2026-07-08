@@ -334,6 +334,17 @@ ActsPlugins::TGeoSurfaceConverter::planeComponents(
         "TGeoArb8 -> PlaneSurface: dz must be normal component of Surface.");
   }
 
+  auto trapezoid3 = dynamic_cast<const TGeoTrap*>(&tgShape);
+  bool trapezoid3Planar =
+      (trapezoid3 != nullptr) &&
+      std::abs(trapezoid3->GetTheta()) < s_epsilon &&
+      std::abs(trapezoid3->GetPhi()) < s_epsilon &&
+      std::abs(trapezoid3->GetAlpha1()) < s_epsilon &&
+      std::abs(trapezoid3->GetAlpha2()) < s_epsilon &&
+      std::abs(trapezoid3->GetH1() - trapezoid3->GetH2()) < s_epsilon &&
+      std::abs(trapezoid3->GetBl1() - trapezoid3->GetBl2()) < s_epsilon &&
+      std::abs(trapezoid3->GetTl1() - trapezoid3->GetTl2()) < s_epsilon;
+
   // The thickness will be filled
   double thickness = 0.;
 
@@ -351,6 +362,12 @@ ActsPlugins::TGeoSurfaceConverter::planeComponents(
       bounds = std::make_shared<const TrapezoidBounds>(
           scalor * dx1, scalor * dx2, scalor * trapezoid2->GetDy1());
       thickness = 2 * scalor * trapezoid2->GetDz();
+    } else if (trapezoid3Planar) {
+      double dx1 = (ys < 0) ? trapezoid3->GetTl1() : trapezoid3->GetBl1();
+      double dx2 = (ys < 0) ? trapezoid3->GetBl1() : trapezoid3->GetTl1();
+      bounds = std::make_shared<const TrapezoidBounds>(
+          scalor * dx1, scalor * dx2, scalor * trapezoid3->GetH1());
+      thickness = 2 * scalor * trapezoid3->GetDz();
     } else if (polygon8 != nullptr) {
       Double_t* tgverts = polygon8->GetVertices();
       std::vector<Vector2> pVertices;

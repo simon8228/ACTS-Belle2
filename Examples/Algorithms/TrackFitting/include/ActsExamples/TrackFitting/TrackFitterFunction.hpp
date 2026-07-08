@@ -81,7 +81,7 @@ std::shared_ptr<TrackFitterFunction> makeKalmanFitterFunction(
     Acts::FreeToBoundCorrection freeToBoundCorrection =
         Acts::FreeToBoundCorrection(),
     double chi2Cut = std::numeric_limits<double>::infinity(),
-    bool useDirectNavigator = false,
+    bool directNavigation = false,
     const Acts::Logger& logger = *Acts::getDefaultLogger("Kalman",
                                                          Acts::Logging::INFO));
 

@@ -63,45 +63,17 @@ void addTrackFitting(py::module& mex) {
            double reverseFilteringMomThreshold,
            double reverseFilteringCovarianceScaling,
            FreeToBoundCorrection freeToBoundCorrection, double chi2Cut,
-           bool useDirectNavigator,
-           Logging::Level level) {
+           bool directNavigation, Logging::Level level) {
           return makeKalmanFitterFunction(
               std::move(trackingGeometry), std::move(magneticField),
               multipleScattering, energyLoss, reverseFilteringMomThreshold,
               reverseFilteringCovarianceScaling, freeToBoundCorrection, chi2Cut,
-              useDirectNavigator,
-              *getDefaultLogger("Kalman", level));
+              directNavigation, *getDefaultLogger("Kalman", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
         "energyLoss"_a, "reverseFilteringMomThreshold"_a,
         "reverseFilteringCovarianceScaling"_a, "freeToBoundCorrection"_a,
-        "chi2Cut"_a, "useDirectNavigator"_a = false, "level"_a);
-
-    py::class_<DafFitterFunction, std::shared_ptr<DafFitterFunction>>(
-        mex, "DafFitterFunction");
-
-    mex.def(
-        "makeDafFitterFunction",
-        [](std::shared_ptr<const TrackingGeometry> trackingGeometry,
-           std::shared_ptr<const MagneticFieldProvider> magneticField,
-           bool multipleScattering, bool energyLoss,
-           FreeToBoundCorrection freeToBoundCorrection,
-           std::vector<double> annealingTemperatures, double annealingCutOff,
-           std::size_t iterationsPerTemperature, std::size_t maxIterations,
-           bool useDirectNavigator, Logging::Level level) {
-          return makeDafFitterFunction(
-              std::move(trackingGeometry), std::move(magneticField),
-              multipleScattering, energyLoss, freeToBoundCorrection,
-              std::move(annealingTemperatures), annealingCutOff,
-              iterationsPerTemperature, maxIterations, useDirectNavigator,
-              *getDefaultLogger("Daf", level));
-        },
-        "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
-        "energyLoss"_a, "freeToBoundCorrection"_a,
-        "annealingTemperatures"_a =
-            std::vector<double>{64., 16., 4., 2., 1.5, 1.},
-        "annealingCutOff"_a = 9., "iterationsPerTemperature"_a = 1,
-        "maxIterations"_a = 100, "useDirectNavigator"_a = true, "level"_a);
+        "chi2Cut"_a, "directNavigation"_a = false, "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(
         mex, "MeasurementCalibrator");

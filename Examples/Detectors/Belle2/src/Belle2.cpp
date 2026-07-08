@@ -92,9 +92,6 @@ class Gen3Belle2Builder : public Belle2Builder {
   void buildPXD(Acts::Experimental::BlueprintNode& parent,
                      const Acts::GeometryContext& gctx);
 
-  void buildBeamPipe(Acts::Experimental::BlueprintNode& parent,
-                     const Acts::GeometryContext& gctx);
-
   std::vector<ProtoLayerSurfaces> buildLayers(
       const Acts::GeometryContext& gctx);
 
@@ -202,6 +199,7 @@ Gen3Belle2Builder::buildTrackingGeometry(
     buildBeamPipe(detector, gctx);
     buildPXD(detector, gctx);
     buildSVD(detector, gctx);
+    // buildCDC(detector, gctx);
     // buildCDC(detector, gctx);
   });
 
@@ -779,7 +777,7 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
   std::vector<double> z_ranges = {140.0_mm, 300.0_mm, 400.0_mm, 500.0_mm};
 
   auto svdBounds =
-      std::make_shared<Acts::CylinderVolumeBounds>(30_mm, 160_mm, 600_mm);
+      std::make_shared<Acts::CylinderVolumeBounds>(30_mm, 150_mm, 3000_mm);
 
   Acts::Transform3 transformationZL6 = Acts::Transform3::Identity();
   transformationZL6.translation() = Acts::Vector3(0_mm, 0_mm, z_positionL6);
@@ -900,10 +898,12 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
 
               layer.setEnvelope(
                   Acts::ExtentEnvelope{{.z = {5_mm, 5_mm}, .r = {5_mm, 5_mm}}});
-
-              layer.setNavigationPolicyFactory(createNavigationPolicy3(
-                  LayerType::Cylinder,
-                  {svdLayers[i].bins0, svdLayers[i].bins1}));
+              /*
+                            layer.setNavigationPolicyFactory(createNavigationPolicy3(
+                                LayerType::Cylinder,
+                                {svdLayers[i].bins0, svdLayers[i].bins1}));
+                          */
+              layer.setNavigationPolicyFactory(createNavigationPolicy2());
             });
           }
 
@@ -1047,6 +1047,27 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildLayers(
 
         auto sensorSurface = tgElementFront->surface().getSharedPtr();
 
+        ACTS_DEBUG("- sensor " << layerCfg.volumeName << " bounds type : "
+                               << sensorSurface->bounds().type() << " -> "
+                               << sensorSurface->bounds());
+
+        if (sensorSurface->bounds().type() ==
+            Acts::SurfaceBounds::eConvexPolygon) {
+          Acts::MaterialSlab svdSlab(B2::Belle2Builder::kSiliconMaterial,
+                                     0.32 * Acts::UnitConstants::mm);
+          //   sensorSurface->assignSurfaceMaterial(
+          //       std::make_shared<Acts::HomogeneousSurfaceMaterial>(svdSlab));
+          sensorSurface->assignSurfaceMaterial(nullptr);
+
+        } else {
+          Acts::BinUtility bu(15, -1.0, 1.0, Acts::open,
+                              Acts::AxisDirection::AxisX);
+          bu += Acts::BinUtility(15, -1.0, 1.0, Acts::open,
+                                 Acts::AxisDirection::AxisY);
+
+          sensorSurface->assignSurfaceMaterial(
+              std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+        }
         // Helper: assign ProtoSurfaceMaterial based on bounds type.
         // Called for both front and back DSSD surfaces.
         auto assignSensorMaterial = [&](std::shared_ptr<Acts::Surface> surf) {
@@ -1239,8 +1260,11 @@ Belle2::Belle2(const Config& cfg)
       .localAxes = ActsPlugins::TGeoAxes("XYZ")};
   Acts::MaterialSlab svdSlab(B2::Belle2Builder::kSiliconMaterial, 0.32f);
   auto svdModuleMaterial =
-      std::static_pointer_cast<const Acts::ISurfaceMaterial>(
-          std::make_shared<Acts::ProtoSurfaceMaterial>());
+      m_cfg.buildProto
+          ? std::static_pointer_cast<const Acts::ISurfaceMaterial>(
+                std::make_shared<Acts::ProtoSurfaceMaterial>())
+          : std::static_pointer_cast<const Acts::ISurfaceMaterial>(
+                std::make_shared<Acts::HomogeneousSurfaceMaterial>(svdSlab));
 
   cl3.moduleMaterial = svdModuleMaterial;
   cl4.moduleMaterial = svdModuleMaterial;
@@ -1294,7 +1318,7 @@ Belle2::Belle2(const Config& cfg)
       if (surface) {
         m_cfg.materialDecorator->decorate(const_cast<Acts::Surface&>(*surface));
       }
-    });
+    }, false);
     m_trackingGeometry->visitVolumes([&](const Acts::TrackingVolume* volume) {
       if (volume) {
         m_cfg.materialDecorator->decorate(

@@ -7,6 +7,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "Acts/Definitions/TrackParametrization.hpp"
+#include "Acts/Definitions/Units.hpp"
 #include "Acts/EventData/MultiTrajectory.hpp"
 #include "Acts/EventData/TrackContainer.hpp"
 #include "Acts/EventData/VectorMultiTrajectory.hpp"
@@ -17,17 +18,21 @@
 #include "Acts/Propagator/Navigator.hpp"
 #include "Acts/Propagator/Propagator.hpp"
 #include "Acts/Propagator/SympyStepper.hpp"
+#include "Acts/Surfaces/BoundaryTolerance.hpp"
 #include "Acts/TrackFitting/GainMatrixUpdater.hpp"
 #include "Acts/TrackFitting/KalmanFitter.hpp"
 #include "Acts/TrackFitting/MbfSmoother.hpp"
+#include "Acts/Utilities/Intersection.hpp"
 #include "Acts/Utilities/Delegate.hpp"
 #include "Acts/Utilities/Logger.hpp"
+#include "Acts/Utilities/TrackHelpers.hpp"
 #include "ActsExamples/EventData/IndexSourceLink.hpp"
 #include "ActsExamples/EventData/MeasurementCalibration.hpp"
 #include "ActsExamples/EventData/Track.hpp"
 #include "ActsExamples/TrackFitting/RefittingCalibrator.hpp"
 #include "ActsExamples/TrackFitting/TrackFitterFunction.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -72,6 +77,10 @@ using namespace ActsExamples;
 struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
   Fitter fitter;
   DirectFitter directFitter;
+  // Plain geometric-Navigator propagator used only for the final
+  // extrapolation to the reference surface after a direct-navigation fit
+  // (the DirectNavigator cannot target a surface outside its sequence).
+  Propagator referencePropagator;
 
   Acts::GainMatrixUpdater kfUpdater;
   Acts::MbfSmoother kfSmoother;
@@ -84,13 +93,26 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
   bool useDirectNavigator = false;
   Acts::FreeToBoundCorrection freeToBoundCorrection;
 
+  bool directNavigation = false;
+
+  std::vector<const Acts::Surface*> materialSurfaces;
+
   IndexSourceLink::SurfaceAccessor slSurfaceAccessor;
 
-  KalmanFitterFunctionImpl(Fitter&& f, DirectFitter&& df,
+  KalmanFitterFunctionImpl(Fitter&& f, DirectFitter&& df, Propagator&& refProp,
                            const Acts::TrackingGeometry& trkGeo)
       : fitter(std::move(f)),
         directFitter(std::move(df)),
-        slSurfaceAccessor{trkGeo} {}
+        referencePropagator(std::move(refProp)),
+        slSurfaceAccessor{trkGeo} {
+    trkGeo.visitSurfaces(
+        [this](const Acts::Surface* srf) {
+          if (srf != nullptr && srf->surfaceMaterial() != nullptr) {
+            materialSurfaces.push_back(srf);
+          }
+        },
+        false);
+  }
 
   template <typename calibrator_t>
   auto makeKfOptions(const GeneralFitterOptions& options,
@@ -140,24 +162,88 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
                                const MeasurementCalibratorAdapter& calibrator,
                                TrackContainer& tracks) const override {
     const auto kfOptions = makeKfOptions(options, calibrator);
-    if (useDirectNavigator) {
+    if (directNavigation) {
       std::vector<const Acts::Surface*> surfaceSequence;
       surfaceSequence.reserve(sourceLinks.size());
-      for (const auto& sl : sourceLinks) {
-        const auto* surf = slSurfaceAccessor(sl);
-        if (surf != nullptr) {
-          surfaceSequence.push_back(surf);
+      bool allResolved = true;
+      for (const auto& sourceLink : sourceLinks) {
+        const Acts::Surface* surface = slSurfaceAccessor(sourceLink);
+        if (surface == nullptr) {
+          allResolved = false;
+          break;
         }
+        surfaceSequence.push_back(surface);
       }
-      // Sort surfaces in propagation order (increasing layer = inner→outer)
-      // so the DirectNavigator steps monotonically along the track.
-      std::sort(surfaceSequence.begin(), surfaceSequence.end(),
-                [](const Acts::Surface* a, const Acts::Surface* b) {
-                  return a->geometryId().layer() < b->geometryId().layer();
-                });
-      return directFitter.fit(sourceLinks.begin(), sourceLinks.end(),
-                              initialParameters, kfOptions, surfaceSequence,
-                              tracks);
+      if (allResolved) {
+        const Acts::Vector3 seedPosition =
+            initialParameters.position(options.geoContext);
+        const Acts::Vector3 seedDirection = initialParameters.direction();
+        auto pathTo = [&](const Acts::Surface* srf) -> double {
+          auto multiIntersection =
+              srf->intersect(options.geoContext, seedPosition, seedDirection,
+                             Acts::BoundaryTolerance::Infinite());
+          const auto& intersection = multiIntersection.closestForward();
+          if (intersection.status() >= Acts::IntersectionStatus::reachable &&
+              intersection.pathLength() > 0) {
+            return intersection.pathLength();
+          }
+          // No forward intersection of the ray (e.g. nearly parallel
+          // surface): fall back to the projection of the surface center.
+          return (srf->center(options.geoContext) - seedPosition)
+              .dot(seedDirection);
+        };
+        double maxHitPath = 0.;
+        for (const Acts::Surface* srf : surfaceSequence) {
+          auto hitIntersection =
+              srf->intersect(options.geoContext, seedPosition, seedDirection,
+                             Acts::BoundaryTolerance::None());
+          const auto& hitIx = hitIntersection.closestForward();
+          if (hitIx.status() >= Acts::IntersectionStatus::reachable &&
+              hitIx.pathLength() > 0) {
+            maxHitPath = std::max(maxHitPath, hitIx.pathLength());
+          }
+        }
+        for (const Acts::Surface* srf : materialSurfaces) {
+          auto multiIntersection =
+              srf->intersect(options.geoContext, seedPosition, seedDirection,
+                             Acts::BoundaryTolerance::None());
+          const auto& intersection = multiIntersection.closestForward();
+          if (intersection.status() >= Acts::IntersectionStatus::reachable &&
+              intersection.pathLength() > 0 &&
+              intersection.pathLength() < maxHitPath + 1.0) {
+            surfaceSequence.push_back(srf);
+          }
+        }
+
+        std::stable_sort(surfaceSequence.begin(), surfaceSequence.end(),
+                         [&](const Acts::Surface* a, const Acts::Surface* b) {
+                           return pathTo(a) < pathTo(b);
+                         });
+        surfaceSequence.erase(
+            std::unique(surfaceSequence.begin(), surfaceSequence.end()),
+            surfaceSequence.end());
+
+        auto directKfOptions = kfOptions;
+        directKfOptions.referenceSurface = nullptr;
+
+        directKfOptions.propagatorPlainOptions.pathLimit =
+            1.5 * Acts::UnitConstants::m;
+
+        auto result = directFitter.fit(sourceLinks.begin(), sourceLinks.end(),
+                                       initialParameters, directKfOptions,
+                                       surfaceSequence, tracks);
+        if (result.ok() && options.referenceSurface != nullptr) {
+          Propagator::Options<> extrapolationOptions(options.geoContext,
+                                                     options.magFieldContext);
+          auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
+              result.value(), *options.referenceSurface, referencePropagator,
+              extrapolationOptions, kfOptions.referenceSurfaceStrategy);
+          if (!extrapolationResult.ok()) {
+            return extrapolationResult.error();
+          }
+        }
+        return result;
+      }
     }
     return fitter.fit(sourceLinks.begin(), sourceLinks.end(), initialParameters,
                       kfOptions, tracks);
@@ -186,8 +272,7 @@ std::shared_ptr<TrackFitterFunction> ActsExamples::makeKalmanFitterFunction(
     double reverseFilteringMomThreshold,
     double reverseFilteringCovarianceScaling,
     Acts::FreeToBoundCorrection freeToBoundCorrection, double chi2Cut,
-    bool useDirectNavigator,
-    const Acts::Logger& logger) {
+    bool directNavigation, const Acts::Logger& logger) {
   // Stepper should be copied into the fitters
   const Stepper stepper(std::move(magneticField));
 
@@ -210,9 +295,16 @@ std::shared_ptr<TrackFitterFunction> ActsExamples::makeKalmanFitterFunction(
   DirectFitter directTrackFitter(std::move(directPropagator),
                                  logger.cloneWithSuffix("DirectFitter"));
 
+  // Geometric-navigation propagator for the post-fit reference-surface
+  // extrapolation of direct-navigation fits.
+  Acts::Navigator refNavigator(cfg, logger.cloneWithSuffix("RefNavigator"));
+  Propagator refPropagator(stepper, std::move(refNavigator),
+                           logger.cloneWithSuffix("RefPropagator"));
+
   // build the fitter function. owns the fitter object.
   auto fitterFunction = std::make_shared<KalmanFitterFunctionImpl>(
-      std::move(trackFitter), std::move(directTrackFitter), geo);
+      std::move(trackFitter), std::move(directTrackFitter),
+      std::move(refPropagator), geo);
   fitterFunction->multipleScattering = multipleScattering;
   fitterFunction->energyLoss = energyLoss;
   fitterFunction->useDirectNavigator = useDirectNavigator;
@@ -222,6 +314,7 @@ std::shared_ptr<TrackFitterFunction> ActsExamples::makeKalmanFitterFunction(
   fitterFunction->reverseFilteringCovarianceScaling =
       reverseFilteringCovarianceScaling;
   fitterFunction->outlierFinder.chi2Cut = chi2Cut;
+  fitterFunction->directNavigation = directNavigation;
 
   return fitterFunction;
 }

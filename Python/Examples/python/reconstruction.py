@@ -584,8 +584,8 @@ def addMyFitter(
     s: acts.examples.Sequencer,
     trackingGeometry: acts.TrackingGeometry,
     field: acts.MagneticFieldProvider,
-    reverseFilteringMomThreshold: float = 0 * u.GeV,
-    reverseFilteringCovarianceScaling: float = 1.0,
+    reverseFilteringMomThreshold: float = 1 * u.GeV,
+    reverseFilteringCovarianceScaling: float = 0.0,
     inputProtoTracks: str = "truth_particle_tracks",
     multipleScattering: bool = True,
     energyLoss: bool = True,
@@ -593,6 +593,7 @@ def addMyFitter(
     calibrator: acts.examples.MeasurementCalibrator = acts.examples.makePassThroughCalibrator(),
     logLevel: Optional[acts.logging.Level] = None,
     chi2CutOff: float = float("inf"),
+    directNavigation: bool = False,
 ) -> None:
     customLogLevel = acts.examples.defaultLogging(s, logLevel)
 
@@ -604,6 +605,7 @@ def addMyFitter(
         "freeToBoundCorrection": acts.examples.FreeToBoundCorrection(False),
         "level": customLogLevel(),
         "chi2Cut": chi2CutOff,
+        "directNavigation": directNavigation,
     }
     fitAlg = acts.examples.TrackFittingAlgorithm(
         level=customLogLevel(),

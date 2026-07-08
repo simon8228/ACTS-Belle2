@@ -31,13 +31,13 @@ struct PurePropagatorPlainOptions {
   ///
   /// This ensures that the propagation does not hang in the stepping loop in
   /// case of misconfiguration or bugs.
-  unsigned int maxSteps = 5000;
+  unsigned int maxSteps = 15000;
 
   /// Maximum number of next target calls for one step
   ///
   /// This ensures that the propagation does not hang in the target resolution
   /// loop in case of misconfiguration or bugs.
-  unsigned int maxTargetSkipping = 100;
+  unsigned int maxTargetSkipping = 300;
 
   /// Absolute maximum path length
   double pathLimit = std::numeric_limits<double>::max();
