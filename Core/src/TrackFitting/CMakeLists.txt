@@ -2,6 +2,7 @@ target_sources(
     ActsCore
     PRIVATE
         KalmanFitterError.cpp
+        DafFitterError.cpp
         GainMatrixUpdater.cpp
         GainMatrixSmoother.cpp
         GlobalChiSquareFitterError.cpp

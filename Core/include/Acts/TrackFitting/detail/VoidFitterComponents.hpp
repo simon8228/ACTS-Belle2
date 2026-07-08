@@ -68,4 +68,18 @@ void voidComponentReducer(std::vector<component_t>& /*components*/,
   throw std::runtime_error{"voidComponentReducer should not ever execute"};
 }
 
+template <typename traj_t>
+double voidDafChiSquareCalculator(
+    typename traj_t::ConstTrackStateProxy /*candidate*/) {
+  throw std::runtime_error{"voidDafChiSquareCalculator should not ever execute"};
+}
+
+template <typename traj_t>
+void voidDafWeightedCombiner(
+    const std::vector<typename traj_t::ConstTrackStateProxy>& /*candidates*/,
+    const std::vector<double>& /*weights*/,
+    typename traj_t::TrackStateProxy /*combined*/) {
+  throw std::runtime_error{"voidDafWeightedCombiner should not ever execute"};
+}
+
 }  // namespace Acts::detail

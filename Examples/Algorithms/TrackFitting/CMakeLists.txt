@@ -6,6 +6,8 @@ acts_add_library(
     src/RefittingAlgorithm.cpp
     src/GsfFitterFunction.cpp
     src/GlobalChiSquareFitterFunction.cpp
+    src/DafFitterFunction.cpp
+    src/DafTrackFittingAlgorithm.cpp
 )
 target_include_directories(
     ActsExamplesTrackFitting
