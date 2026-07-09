@@ -92,6 +92,9 @@ class Gen3Belle2Builder : public Belle2Builder {
   void buildPXD(Acts::Experimental::BlueprintNode& parent,
                      const Acts::GeometryContext& gctx);
 
+  void buildBeamPipe(Acts::Experimental::BlueprintNode& parent,
+      const Acts::GeometryContext& gctx);
+
   std::vector<ProtoLayerSurfaces> buildLayers(
       const Acts::GeometryContext& gctx);
 
@@ -1047,27 +1050,27 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildLayers(
 
         auto sensorSurface = tgElementFront->surface().getSharedPtr();
 
-        ACTS_DEBUG("- sensor " << layerCfg.volumeName << " bounds type : "
-                               << sensorSurface->bounds().type() << " -> "
-                               << sensorSurface->bounds());
+        // ACTS_DEBUG("- sensor " << layerCfg.volumeName << " bounds type : "
+        //                        << sensorSurface->bounds().type() << " -> "
+        //                        << sensorSurface->bounds());
 
-        if (sensorSurface->bounds().type() ==
-            Acts::SurfaceBounds::eConvexPolygon) {
-          Acts::MaterialSlab svdSlab(B2::Belle2Builder::kSiliconMaterial,
-                                     0.32 * Acts::UnitConstants::mm);
-          //   sensorSurface->assignSurfaceMaterial(
-          //       std::make_shared<Acts::HomogeneousSurfaceMaterial>(svdSlab));
-          sensorSurface->assignSurfaceMaterial(nullptr);
+        // if (sensorSurface->bounds().type() ==
+        //     Acts::SurfaceBounds::eConvexPolygon) {
+        //   Acts::MaterialSlab svdSlab(B2::Belle2Builder::kSiliconMaterial,
+        //                              0.32 * Acts::UnitConstants::mm);
+        //   //   sensorSurface->assignSurfaceMaterial(
+        //   //       std::make_shared<Acts::HomogeneousSurfaceMaterial>(svdSlab));
+        //   sensorSurface->assignSurfaceMaterial(nullptr);
 
-        } else {
-          Acts::BinUtility bu(15, -1.0, 1.0, Acts::open,
-                              Acts::AxisDirection::AxisX);
-          bu += Acts::BinUtility(15, -1.0, 1.0, Acts::open,
-                                 Acts::AxisDirection::AxisY);
+        // } else {
+        //   Acts::BinUtility bu(15, -1.0, 1.0, Acts::open,
+        //                       Acts::AxisDirection::AxisX);
+        //   bu += Acts::BinUtility(15, -1.0, 1.0, Acts::open,
+        //                          Acts::AxisDirection::AxisY);
 
-          sensorSurface->assignSurfaceMaterial(
-              std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-        }
+        //   sensorSurface->assignSurfaceMaterial(
+        //       std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
+        // }
         // Helper: assign ProtoSurfaceMaterial based on bounds type.
         // Called for both front and back DSSD surfaces.
         auto assignSensorMaterial = [&](std::shared_ptr<Acts::Surface> surf) {

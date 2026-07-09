@@ -90,7 +90,6 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
 
   bool multipleScattering = false;
   bool energyLoss = false;
-  bool useDirectNavigator = false;
   Acts::FreeToBoundCorrection freeToBoundCorrection;
 
   bool directNavigation = false;
@@ -307,7 +306,6 @@ std::shared_ptr<TrackFitterFunction> ActsExamples::makeKalmanFitterFunction(
       std::move(refPropagator), geo);
   fitterFunction->multipleScattering = multipleScattering;
   fitterFunction->energyLoss = energyLoss;
-  fitterFunction->useDirectNavigator = useDirectNavigator;
   fitterFunction->reverseFilteringLogic.momentumThreshold =
       reverseFilteringMomThreshold;
   fitterFunction->freeToBoundCorrection = freeToBoundCorrection;
