@@ -29,6 +29,6 @@ class MyIdentifierProvider : public ActsPlugins::ITGeoIdentifierProvider {
 		int sensor = std::stoi(tokens[2]);
 		int id = (layer << 13) | (ladder << 8) | (sensor << 5);
 
-		return static_cast<ActsPlugins::TGeoDetectorElement::Identifier>(id);
+		return static_cast<ActsPlugins::TGeoDetectorElement::Identifier>(tgnode.GetNumber());
 	}
 };
