@@ -190,7 +190,7 @@ def main():
         materialDecorator = acts.IMaterialDecorator.fromFile(args.map)
 
     from acts.examples import Belle2
-    detector = Belle2(materialDecorator=None)
+    detector = Belle2(materialDecorator=materialDecorator)
     trackingGeometry = detector.trackingGeometry()
 
     materialSurfaces = trackingGeometry.extractMaterialSurfaces()

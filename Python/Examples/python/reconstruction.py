@@ -594,6 +594,7 @@ def addMyFitter(
     logLevel: Optional[acts.logging.Level] = None,
     chi2CutOff: float = float("inf"),
     directNavigation: bool = False,
+    maxSteps: int = 5000,
 ) -> None:
     customLogLevel = acts.examples.defaultLogging(s, logLevel)
 
@@ -615,6 +616,7 @@ def addMyFitter(
         inputClusters=clusters if clusters is not None else "",
         outputTracks="kf_tracks",
         pickTrack=-1,
+        maxSteps=maxSteps,
         fit=acts.examples.makeKalmanFitterFunction(
             trackingGeometry, field, **kalmanOptions
         ),

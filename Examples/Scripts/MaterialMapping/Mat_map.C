@@ -161,7 +161,7 @@ void Mat_map(std::string Val = "", std::string geantino = "", std::string name =
   const double kDeg = TMath::Pi() / 180.0;
   const double kLineR = 3000.0;
   // const std::vector<int> kThetaAngles = {10, 20, 40, 70, 110, 140, 160, 170};
-  const std::vector<int> kThetaAngles = {15, 17, 27, 35};
+  const std::vector<int> kThetaAngles = {40, 60, 70, 90, 120, 130};
   std::vector<TLine*> theta_lines;
   std::vector<TLatex*> theta_labels;
   for (int th : kThetaAngles) {
