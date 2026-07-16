@@ -48,8 +48,8 @@ void addTrackFitting(py::module& mex) {
   ACTS_PYTHON_DECLARE_ALGORITHM(
       DafTrackFittingAlgorithm, mex, "DafTrackFittingAlgorithm",
       inputMeasurements, inputProtoTracks, inputInitialTrackParameters,
-      inputClusters, outputTracks, trackingGeometry, fit, pickTrack,
-      calibrator, linkForward, maxSteps, maxCandidateSeparation);
+      inputClusters, inputMeasurementParticlesMap, outputTracks,
+      trackingGeometry, fit, pickTrack, calibrator, linkForward, maxSteps);
 
   {
     py::class_<TrackFitterFunction, std::shared_ptr<TrackFitterFunction>>(

@@ -28,10 +28,14 @@
 #include "Acts/Utilities/Result.hpp"
 #include "Acts/Utilities/TrackHelpers.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <system_error>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Acts {
@@ -291,6 +295,18 @@ class DeterministicAnnealingFitter {
       }
 
       DafCandidateState& candState = candidateState[surface];
+      // Single-candidate surfaces are skipped: their weight is trivially ~1
+      // and would only drown out the surfaces where the DAF actually has a
+      // choice to make.
+      if (group.size() > 1 && logger().doPrint(Logging::DEBUG)) {
+        std::stringstream ss;
+        for (std::size_t i = 0; i < group.size(); ++i) {
+          ss << " [chi2=" << chi2s[i] << " w: " << candState.weights[i]
+             << " -> " << weights[i] << "]";
+        }
+        ACTS_DEBUG("DAF weight update on surface " << surface->geometryId()
+                                                   << ":" << ss.str());
+      }
       candState.weights = weights;
       candState.chi2 = chi2s;
     }
@@ -338,6 +354,29 @@ class DeterministicAnnealingFitter {
     AnnealingUtility annealing(dafOptions.annealingConfig);
     AnnealingUtility::State annealingState;
 
+    if (logger().doPrint(Logging::DEBUG)) {
+      std::size_t nMultiCandidate = 0;
+      for (const auto& [surface, group] : measurementGroups) {
+        (void)surface;
+        nMultiCandidate += static_cast<std::size_t>(group.size() > 1);
+      }
+      std::stringstream tempSs;
+      for (double t : dafOptions.annealingConfig.setOfTemperatures) {
+        tempSs << t << " ";
+      }
+      ACTS_DEBUG("DAF fit start: "
+                 << measurementGroups.size() << " surface(s), "
+                 << nMultiCandidate
+                 << " with >1 candidate; temperature schedule: "
+                 << tempSs.str() << "x "
+                 << dafOptions.iterationsPerTemperature
+                 << " iteration(s) each = " << totalIterations
+                 << " passes; seed pos="
+                 << sParameters.position(dafOptions.geoContext).transpose()
+                 << " p=" << sParameters.absoluteMomentum()
+                 << " pT=" << sParameters.transverseMomentum());
+    }
+
     traj_t scratchCandidateStates;
 
     Acts::TrackContainer scratchTrackContainer{VectorTrackContainer{},
@@ -368,6 +407,55 @@ class DeterministicAnnealingFitter {
     // them into the output container reproduces that success.
     std::optional<BoundTrackParameters> lastGoodSeed;
     DafCandidateMap lastGoodCandidateState;
+
+    // Every pass's smoothed chi2, in pass order -- the raw material for the
+    // end-of-fit convergence summary.
+    std::vector<double> chi2History;
+
+    // Compact per-surface weight list, sorted by geometry id so the same
+    // surface always appears in the same position across passes.
+    auto weightSummary = [&]() {
+      std::vector<std::pair<std::uint64_t, const DafCandidateState*>> sorted;
+      sorted.reserve(candidateState.size());
+      for (const auto& [surface, candState] : candidateState) {
+        sorted.emplace_back(surface->geometryId().value(), &candState);
+      }
+      std::sort(sorted.begin(), sorted.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+      std::stringstream ss;
+      for (const auto& [geoIdValue, candState] : sorted) {
+        ss << " " << GeometryIdentifier(geoIdValue).sensitive() << "=";
+        if (candState->weights.size() == 1) {
+          ss << candState->weights.front();
+        } else {
+          ss << "[";
+          for (std::size_t i = 0; i < candState->weights.size(); ++i) {
+            ss << (i > 0 ? "," : "") << candState->weights[i];
+          }
+          ss << "]";
+        }
+      }
+      return ss.str();
+    };
+
+    // One-line convergence story: chi2 of every pass, with '|' marking the
+    // annealing temperature steps, plus the weights the fit ended on.
+    auto logFitSummary = [&](const char* outcome, double finalChi2) {
+      if (!logger().doPrint(Logging::DEBUG)) {
+        return;
+      }
+      chi2History.push_back(finalChi2);
+      std::stringstream ss;
+      for (std::size_t i = 0; i < chi2History.size(); ++i) {
+        if (i > 0 && i % dafOptions.iterationsPerTemperature == 0) {
+          ss << " |";
+        }
+        ss << " " << chi2History[i];
+      }
+      ACTS_DEBUG("DAF " << outcome << " after " << chi2History.size() << "/"
+                        << totalIterations << " passes; chi2 per pass:"
+                        << ss.str() << "; final w:" << weightSummary());
+    };
 
     // Runs one forward+smooth pass into the caller's output container using
     // the given seed and whatever weights candidateState currently holds, then
@@ -430,15 +518,32 @@ class DeterministicAnnealingFitter {
         ACTS_DEBUG("Salvage pass unexpectedly failed: " << salvaged.error());
         return salvaged.error();
       }
+      logFitSummary("salvaged", salvaged.value().chi2());
       return salvaged;
     };
 
     for (std::size_t iter = 0; iter < totalIterations; ++iter) {
       const bool isFinalIteration = (iter + 1 == totalIterations);
 
+      const auto& seedPars = currentSeed.parameters();
+      ACTS_DEBUG("DAF pass "
+                 << (iter + 1) << "/" << totalIterations << " at T="
+                 << dafOptions.annealingConfig
+                        .setOfTemperatures[annealingState.currentTemperatureIndex]
+                 << (isFinalIteration
+                         ? " (final pass, writes the output track)"
+                         : "")
+                 << "; seed loc=(" << seedPars[eBoundLoc0] << ", "
+                 << seedPars[eBoundLoc1] << ") phi=" << seedPars[eBoundPhi]
+                 << " theta=" << seedPars[eBoundTheta]
+                 << " q/p=" << seedPars[eBoundQOverP]
+                 << " p=" << currentSeed.absoluteMomentum()
+                 << " pT=" << currentSeed.transverseMomentum());
+
       if (isFinalIteration) {
         auto finalTrack = finalizeInto(currentSeed);
         if (finalTrack.ok()) {
+          logFitSummary("finished", finalTrack.value().chi2());
           return finalTrack.value();
         }
         ACTS_DEBUG("Final DAF pass failed: " << finalTrack.error());
@@ -484,6 +589,10 @@ class DeterministicAnnealingFitter {
         currentSeed = BoundTrackParameters(
             fm.referenceSurface().getSharedPtr(), fm.smoothed(),
             fm.smoothedCovariance(), currentSeed.particleHypothesis());
+        ACTS_VERBOSE("Re-seeding next pass from the smoothed first-measurement "
+                     "state on surface "
+                     << fm.referenceSurface().geometryId()
+                     << ": params=" << currentSeed.parameters().transpose());
       } else {
         ACTS_DEBUG("Could not find first measurement state to re-seed next "
                    "pass, reusing previous seed: "
@@ -494,8 +603,36 @@ class DeterministicAnnealingFitter {
                              candidateState, annealing, annealingState,
                              scratchCandidateStates);
 
+      if (logger().doPrint(Logging::DEBUG)) {
+        std::stringstream msg;
+        msg << "DAF pass " << (iter + 1) << "/" << totalIterations
+            << " done: chi2 ";
+        if (!chi2History.empty()) {
+          msg << chi2History.back() << " -> ";
+        }
+        msg << forwardTrack.chi2() << "; meas="
+            << forwardTrack.nMeasurements() << "/" << measurementGroups.size()
+            << " holes=" << forwardTrack.nHoles() << "; w:" << weightSummary();
+        ACTS_DEBUG(msg.str());
+      }
+      chi2History.push_back(forwardTrack.chi2());
+
       if ((iter + 1) % dafOptions.iterationsPerTemperature == 0) {
+        const auto& temperatures =
+            dafOptions.annealingConfig.setOfTemperatures;
+        const double oldT =
+            temperatures[annealingState.currentTemperatureIndex];
         annealing.anneal(annealingState);
+        const double newT =
+            temperatures[annealingState.currentTemperatureIndex];
+        ACTS_DEBUG("DAF annealing step after pass "
+                   << (iter + 1) << ": T " << oldT << " -> " << newT
+                   << " (temperature "
+                   << annealingState.currentTemperatureIndex + 1 << "/"
+                   << temperatures.size() << ")"
+                   << (annealingState.equilibriumReached
+                           ? ", equilibrium reached"
+                           : ""));
       }
     }
 

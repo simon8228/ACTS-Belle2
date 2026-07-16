@@ -25,13 +25,17 @@
 #include "ActsExamples/EventData/Measurement.hpp"
 #include "ActsExamples/EventData/MeasurementCalibration.hpp"
 #include "ActsExamples/Framework/AlgorithmContext.hpp"
+#include "ActsExamples/Validation/TrackClassification.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace ActsExamples {
 
@@ -66,6 +70,8 @@ DafTrackFittingAlgorithm::DafTrackFittingAlgorithm(
   m_inputProtoTracks.initialize(m_cfg.inputProtoTracks);
   m_inputInitialTrackParameters.initialize(m_cfg.inputInitialTrackParameters);
   m_inputClusters.maybeInitialize(m_cfg.inputClusters);
+  m_inputMeasurementParticlesMap.maybeInitialize(
+      m_cfg.inputMeasurementParticlesMap);
   m_outputTracks.initialize(m_cfg.outputTracks);
 }
 
@@ -78,6 +84,11 @@ ProcessCode DafTrackFittingAlgorithm::execute(
 
   const ClusterContainer* clusters =
       m_inputClusters.isInitialized() ? &m_inputClusters(ctx) : nullptr;
+
+  const MeasurementParticlesMap* measurementParticlesMap =
+      m_inputMeasurementParticlesMap.isInitialized()
+          ? &m_inputMeasurementParticlesMap(ctx)
+          : nullptr;
 
   ACTS_DEBUG("Input measurements: " << measurements.size());
   ACTS_DEBUG("Input proto tracks: " << protoTracks.size());
@@ -147,6 +158,23 @@ ProcessCode DafTrackFittingAlgorithm::execute(
         "Initial direction: " << initialParams.direction().transpose());
     ACTS_VERBOSE("Initial momentum: " << initialParams.absoluteMomentum());
 
+    // Truth gate: only candidates truth-matched to the proto track's
+    // majority particle are admitted into a surface's competing group.
+    std::optional<SimBarcode> trackParticle;
+    if (measurementParticlesMap != nullptr) {
+      std::vector<ParticleHitCount> particleHitCounts;
+      identifyContributingParticles(*measurementParticlesMap, protoTrack,
+                                    particleHitCounts);
+      if (particleHitCounts.empty()) {
+        ACTS_WARNING("Proto track "
+                     << itrack
+                     << " has no truth-matched measurements; pooling "
+                        "candidates unfiltered.");
+      } else {
+        trackParticle = particleHitCounts.front().particleId;
+      }
+    }
+
     measurementGroups.clear();
     orderedSurfaces.clear();
     for (auto measIndex : protoTrack) {
@@ -165,14 +193,16 @@ ProcessCode DafTrackFittingAlgorithm::execute(
 
       Acts::DafMeasurementGroup group;
       auto [begin, end] = measurements.orderedIndices().equal_range(geoId);
-      const Acts::Vector2 anchor =
-          measurements.getMeasurement(measIndex).fullParameters().head<2>();
       std::size_t nRejected = 0;
       for (auto it = begin; it != end; ++it) {
-        if (m_cfg.maxCandidateSeparation > 0.) {
-          const Acts::Vector2 candidatePos =
-              measurements.getMeasurement(it->index()).fullParameters().head<2>();
-          if ((candidatePos - anchor).norm() > m_cfg.maxCandidateSeparation) {
+        if (trackParticle.has_value()) {
+          auto [pBegin, pEnd] =
+              measurementParticlesMap->equal_range(it->index());
+          const bool sameParticle =
+              std::any_of(pBegin, pEnd, [&](const auto& measParticle) {
+                return measParticle.second == *trackParticle;
+              });
+          if (!sameParticle) {
             ++nRejected;
             continue;
           }
@@ -180,19 +210,18 @@ ProcessCode DafTrackFittingAlgorithm::execute(
         group.push_back(Acts::SourceLink(*it));
       }
       if (group.empty()) {
-        // Only the gate can empty a group entirely (measIndex's own
-        // measurement always self-matches at distance 0), so this is a
-        // maxCandidateSeparation misconfiguration, not a data problem.
-        ACTS_WARNING("All candidates on surface "
-                     << geoId << " rejected by maxCandidateSeparation="
-                     << m_cfg.maxCandidateSeparation << "; skipping surface.");
+        // The proto track's own pick at this surface belongs to a different
+        // particle than the track's majority particle (a contaminating hit),
+        // so no candidate survives -- dropping the surface is the correct
+        // outcome, not an error.
+        ACTS_DEBUG("All candidates on surface "
+                   << geoId << " belong to other particles; skipping surface.");
         continue;
       }
       if (nRejected > 0) {
         ACTS_DEBUG("Rejected " << nRejected
-                               << " out-of-window candidate(s) on surface "
-                               << geoId << " (maxCandidateSeparation="
-                               << m_cfg.maxCandidateSeparation << ")");
+                               << " other-particle candidate(s) on surface "
+                               << geoId);
       }
       if (group.size() > 1) {
         ++nAmbiguousSurfaces;

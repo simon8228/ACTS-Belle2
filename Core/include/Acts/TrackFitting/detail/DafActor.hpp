@@ -359,24 +359,33 @@ class DafActor {
       extensions.weightedCombiner(constCandidates, candState.weights,
                                   trackStateProxy);
 
-      if (logger().doPrint(Logging::DEBUG)) {
+      // Surfaces with a real multi-candidate decision log at DEBUG; the
+      // (common) single-candidate case repeats near-identically every
+      // annealing pass and is only VERBOSE-level detail.
+      const bool hasCandidateChoice = candidates.size() > 1;
+      if (logger().doPrint(hasCandidateChoice ? Logging::DEBUG
+                                              : Logging::VERBOSE)) {
         std::stringstream candSs;
         for (std::size_t i = 0; i < candidates.size(); ++i) {
           candSs << " [w=" << candState.weights[i] << " meas="
                  << candidates[i].effectiveCalibrated().transpose() << "]";
         }
-        const std::size_t combinedMeasdim = trackStateProxy.calibratedSize();
-        ACTS_DEBUG("DafActor: combined "
-                   << candidates.size() << " candidate(s) on surface "
-                   << surface.geometryId() << " predicted="
-                   << trackStateProxy.predicted().transpose()
-                   << " candidates:" << candSs.str() << " -> combined meas="
-                   << trackStateProxy.effectiveCalibrated().transpose()
-                   << " combined covariance diag="
-                   << trackStateProxy.effectiveCalibratedCovariance()
-                          .diagonal()
-                          .transpose()
-                   << " measdim=" << combinedMeasdim);
+        std::stringstream msg;
+        msg << "DafActor: combined " << candidates.size()
+            << " candidate(s) on surface " << surface.geometryId()
+            << " predicted=" << trackStateProxy.predicted().transpose()
+            << " candidates:" << candSs.str() << " -> combined meas="
+            << trackStateProxy.effectiveCalibrated().transpose()
+            << " combined covariance diag="
+            << trackStateProxy.effectiveCalibratedCovariance()
+                   .diagonal()
+                   .transpose()
+            << " measdim=" << trackStateProxy.calibratedSize();
+        if (hasCandidateChoice) {
+          ACTS_DEBUG(msg.str());
+        } else {
+          ACTS_VERBOSE(msg.str());
+        }
       }
 
       // The real (non-scratch) track state otherwise has no uncalibrated
@@ -413,7 +422,8 @@ class DafActor {
 
       result.lastTrackIndex = trackStateProxy.index();
 
-      if (logger().doPrint(Logging::DEBUG)) {
+      if (logger().doPrint(hasCandidateChoice ? Logging::DEBUG
+                                              : Logging::VERBOSE)) {
         const double predictedP =
             1. / std::abs(trackStateProxy.predicted()[eBoundQOverP]);
         const double predictedPt =
@@ -422,11 +432,16 @@ class DafActor {
             1. / std::abs(trackStateProxy.filtered()[eBoundQOverP]);
         const double filteredPt =
             filteredP * std::sin(trackStateProxy.filtered()[eBoundTheta]);
-        ACTS_DEBUG("DafActor: Kalman update on surface "
-                   << surface.geometryId() << " predicted p=" << predictedP
-                   << " pT=" << predictedPt << " -> filtered p=" << filteredP
-                   << " pT=" << filteredPt << " (ratio p="
-                   << filteredP / predictedP << ")");
+        std::stringstream msg;
+        msg << "DafActor: Kalman update on surface " << surface.geometryId()
+            << " predicted p=" << predictedP << " pT=" << predictedPt
+            << " -> filtered p=" << filteredP << " pT=" << filteredPt
+            << " (ratio p=" << filteredP / predictedP << ")";
+        if (hasCandidateChoice) {
+          ACTS_DEBUG(msg.str());
+        } else {
+          ACTS_VERBOSE(msg.str());
+        }
       }
 
       ACTS_VERBOSE("Filtering step successful, updated parameters are:\n"

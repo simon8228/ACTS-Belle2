@@ -642,8 +642,9 @@ def addMyDafFitter(
     iterationsPerTemperature: int = 1,
     maxIterations: int = 100,
     useDirectNavigator: bool = True,
-    maxCandidateSeparation: float = 5.0,
+    inputMeasurementParticlesMap: str = "measurement_particles_map",
     maxSteps: int = 5000,
+    pickTrack: int = -1,
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
     collection names and "tracks" whiteboard alias), but fits with the Deterministic
@@ -652,8 +653,13 @@ def addMyDafFitter(
     of competing measurement candidates from the raw "measurements" collection and the
     DAF assigns each candidate a soft, chi2/temperature-based weight instead.
 
-    `maxCandidateSeparation` (mm) limits how far a competing candidate may sit from the
-    proto track's own pick at a surface to be admitted into the candidate group.
+    `inputMeasurementParticlesMap` names the measurement->particle truth map (as
+    produced by CsvMeasurementReader); only candidates truth-matched to the proto
+    track's majority particle are admitted into a surface's competing group. Pass ""
+    to disable the gate and pool every measurement sharing the geometry ID.
+
+    `pickTrack` fits only that proto track index per event (-1 = all); combined with
+    DEBUG logging it isolates a single track's DAF trace (schedule, per-pass weights).
     """
     customLogLevel = acts.examples.defaultLogging(s, logLevel)
 
@@ -666,11 +672,11 @@ def addMyDafFitter(
         inputProtoTracks=inputProtoTracks,
         inputInitialTrackParameters="estimatedparameters",
         inputClusters=clusters if clusters is not None else "",
+        inputMeasurementParticlesMap=inputMeasurementParticlesMap,
         outputTracks="kf_tracks",
         trackingGeometry=trackingGeometry,
-        pickTrack=-1,
+        pickTrack=pickTrack,
         maxSteps=maxSteps,
-        maxCandidateSeparation=maxCandidateSeparation,
         fit=acts.examples.makeDafFitterFunction(
             trackingGeometry,
             field,

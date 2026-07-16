@@ -13,6 +13,7 @@
 #include "ActsExamples/EventData/Measurement.hpp"
 #include "ActsExamples/EventData/ProtoTrack.hpp"
 #include "ActsExamples/EventData/Track.hpp"
+#include "ActsExamples/EventData/TruthMatching.hpp"
 #include "ActsExamples/Framework/DataHandle.hpp"
 #include "ActsExamples/Framework/IAlgorithm.hpp"
 #include "ActsExamples/Framework/ProcessCode.hpp"
@@ -35,7 +36,9 @@ namespace ActsExamples {
 /// the proto track builder happened to pick -- and hands the whole group to
 /// DAF as competing candidates. This is what lets DAF actually resolve
 /// ambiguity (e.g. SVD sensor overlaps) that a proto track already collapsed
-/// to a single choice.
+/// to a single choice. With inputMeasurementParticlesMap set, the group is
+/// restricted to measurements truth-matched to the proto track's majority
+/// particle, keeping unrelated particles' hits on the same sensor out.
 class DafTrackFittingAlgorithm final : public IAlgorithm {
  public:
   struct Config {
@@ -50,6 +53,13 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
     std::string inputInitialTrackParameters;
     /// (optional) Input clusters for each measurement
     std::string inputClusters;
+    /// (optional) Input measurement-to-particle truth map. When set, a
+    /// surface's competing-candidate group only admits measurements whose
+    /// truth particle matches the proto track's majority particle, so hits
+    /// from unrelated particles that happen to cross the same sensor never
+    /// reach DAF. When empty, every measurement sharing the geometry ID is
+    /// pooled.
+    std::string inputMeasurementParticlesMap;
     /// Output fitted tracks collection.
     std::string outputTracks;
     /// Tracking geometry, used to resolve surfaces from geometry IDs.
@@ -65,16 +75,6 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
     bool linkForward = false;
     /// Maximum number of propagation steps per track.
     unsigned int maxSteps = 5000;
-    /// Maximum local-position separation (mm) between a candidate
-    /// measurement and the proto track's own pick at a surface for the
-    /// candidate to be admitted into DAF's competing-candidate group.
-    /// Candidates further away are assumed to belong to a different
-    /// particle that happens to cross the same surface (common in occupied
-    /// events) rather than a genuine overlap ambiguity, and are dropped
-    /// before DAF ever sees them. <= 0 disables the gate, i.e. every
-    /// measurement sharing the geometry ID is included (previous
-    /// behavior).
-    double maxCandidateSeparation = -1.0;
   };
 
   /// Constructor of the DAF fitting algorithm
@@ -104,6 +104,9 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
       this, "InputInitialTrackParameters"};
 
   ReadDataHandle<ClusterContainer> m_inputClusters{this, "InputClusters"};
+
+  ReadDataHandle<MeasurementParticlesMap> m_inputMeasurementParticlesMap{
+      this, "InputMeasurementParticlesMap"};
 
   WriteDataHandle<ConstTrackContainer> m_outputTracks{this, "OutputTracks"};
 };
