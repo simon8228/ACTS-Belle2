@@ -612,11 +612,6 @@ void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
     using enum Acts::AxisDirection;
     using enum Acts::AxisBoundaryType;
 
-    // matNode.configureFace(
-    //     Face::OuterCylinder,
-    //     Acts::DirectedProtoAxis(AxisRPhi, Closed, -M_PI, M_PI, 120),
-    //     Acts::DirectedProtoAxis(AxisZ, Open, -100_mm, 120_mm, 110));
-
     matNode.addStaticVolume(
         pxdTransform, pxdBounds, "PXD_Container",
         [&](auto& pxdVol) {

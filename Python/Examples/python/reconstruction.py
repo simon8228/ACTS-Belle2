@@ -627,6 +627,70 @@ def addMyFitter(
 
     return s
 
+def addMyDafFitter(
+    s: acts.examples.Sequencer,
+    trackingGeometry: acts.TrackingGeometry,
+    field: acts.MagneticFieldProvider,
+    inputProtoTracks: str = "truth_particle_tracks",
+    multipleScattering: bool = True,
+    energyLoss: bool = True,
+    clusters: str = None,
+    calibrator: acts.examples.MeasurementCalibrator = acts.examples.makePassThroughCalibrator(),
+    logLevel: Optional[acts.logging.Level] = None,
+    annealingTemperatures: Optional[List[float]] = None,
+    annealingCutOff: float = 9.0,
+    iterationsPerTemperature: int = 1,
+    maxIterations: int = 100,
+    useDirectNavigator: bool = True,
+    maxCandidateSeparation: float = 5.0,
+    maxSteps: int = 5000,
+) -> None:
+    """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
+    collection names and "tracks" whiteboard alias), but fits with the Deterministic
+    Annealing Filter. Unlike the plain KF, the proto track's hit choice per surface is
+    not trusted as final: DafTrackFittingAlgorithm re-derives every surface's full set
+    of competing measurement candidates from the raw "measurements" collection and the
+    DAF assigns each candidate a soft, chi2/temperature-based weight instead.
+
+    `maxCandidateSeparation` (mm) limits how far a competing candidate may sit from the
+    proto track's own pick at a surface to be admitted into the candidate group.
+    """
+    customLogLevel = acts.examples.defaultLogging(s, logLevel)
+
+    if annealingTemperatures is None:
+        annealingTemperatures = [64.0, 16.0, 4.0, 2.0, 1.5, 1.0]
+
+    fitAlg = acts.examples.DafTrackFittingAlgorithm(
+        level=customLogLevel(),
+        inputMeasurements="measurements",
+        inputProtoTracks=inputProtoTracks,
+        inputInitialTrackParameters="estimatedparameters",
+        inputClusters=clusters if clusters is not None else "",
+        outputTracks="kf_tracks",
+        trackingGeometry=trackingGeometry,
+        pickTrack=-1,
+        maxSteps=maxSteps,
+        maxCandidateSeparation=maxCandidateSeparation,
+        fit=acts.examples.makeDafFitterFunction(
+            trackingGeometry,
+            field,
+            multipleScattering,
+            energyLoss,
+            acts.examples.FreeToBoundCorrection(False),
+            annealingTemperatures,
+            annealingCutOff,
+            iterationsPerTemperature,
+            maxIterations,
+            useDirectNavigator=useDirectNavigator,
+            level=customLogLevel(),
+        ),
+        calibrator=calibrator,
+    )
+    s.addAlgorithm(fitAlg)
+    s.addWhiteboardAlias("tracks", fitAlg.config.outputTracks)
+
+    return s
+
 def addTruthSmearedSeeding(
     s: acts.examples.Sequencer,
     rnd: Optional[acts.examples.RandomNumbers],
