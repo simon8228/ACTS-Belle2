@@ -645,6 +645,7 @@ def addMyDafFitter(
     inputMeasurementParticlesMap: str = "measurement_particles_map",
     maxSteps: int = 5000,
     pickTrack: int = -1,
+    outputCandidatesDir: str = "",
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
     collection names and "tracks" whiteboard alias), but fits with the Deterministic
@@ -660,6 +661,11 @@ def addMyDafFitter(
 
     `pickTrack` fits only that proto track index per event (-1 = all); combined with
     DEBUG logging it isolates a single track's DAF trace (schedule, per-pass weights).
+
+    `outputCandidatesDir` (empty = off) writes per-event `daf-candidates.csv` files
+    there: one row per candidate per fitted track with the DAF's final weight/chi2,
+    whether it won its surface, and the fitted-track -> proto-track linkage. Used by
+    SVD_tracking/visualize_event_daf.py.
     """
     customLogLevel = acts.examples.defaultLogging(s, logLevel)
 
@@ -677,6 +683,7 @@ def addMyDafFitter(
         trackingGeometry=trackingGeometry,
         pickTrack=pickTrack,
         maxSteps=maxSteps,
+        outputCandidatesDir=outputCandidatesDir,
         fit=acts.examples.makeDafFitterFunction(
             trackingGeometry,
             field,

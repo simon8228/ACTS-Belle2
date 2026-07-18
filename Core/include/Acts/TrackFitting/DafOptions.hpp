@@ -93,6 +93,23 @@ struct DafFitterExtensions {
   }
 };
 
+/// Per-surface persistent annealing state: the fixed candidate source links,
+/// their current annealed weight, and their most recent chi2 -- carried by
+/// the outer driver across forward+smooth passes since it cannot live in the
+/// trajectory (only the effective combined measurement is written there).
+struct DafCandidateState {
+  /// The candidate source links, fixed for the whole fit
+  DafMeasurementGroup candidates;
+  /// Current annealed weight of each candidate, same order as candidates
+  std::vector<double> weights;
+  /// Most recent chi2 of each candidate, same order as candidates
+  std::vector<double> chi2;
+};
+
+/// Per-surface map of persistent annealing state, keyed the same way as the
+/// input measurement groups.
+using DafCandidateMap = std::unordered_map<const Surface*, DafCandidateState>;
+
 /// Combined options for the Deterministic Annealing Filter.
 /// @tparam traj_t The trajectory type
 template <typename traj_t>
@@ -177,24 +194,15 @@ struct DafFitterOptions {
   /// schedule, as a safety net independent of the temperature schedule
   /// length.
   std::size_t maxIterations = 100;
-};
 
-/// Per-surface persistent annealing state: the fixed candidate source links,
-/// their current annealed weight, and their most recent chi2 -- carried by
-/// the outer driver across forward+smooth passes since it cannot live in the
-/// trajectory (only the effective combined measurement is written there).
-struct DafCandidateState {
-  /// The candidate source links, fixed for the whole fit
-  DafMeasurementGroup candidates;
-  /// Current annealed weight of each candidate, same order as candidates
-  std::vector<double> weights;
-  /// Most recent chi2 of each candidate, same order as candidates
-  std::vector<double> chi2;
+  /// Optional out-parameter: when non-null, the fitter copies the final
+  /// per-surface candidate state (weights/chi2 as consumed by the pass that
+  /// produced the returned track, including a salvaged one) into it. The
+  /// weights are otherwise internal to the annealing loop and discarded.
+  /// Not a constructor parameter -- set it after construction; all existing
+  /// construction sites stay valid.
+  DafCandidateMap* finalCandidateState = nullptr;
 };
-
-/// Per-surface map of persistent annealing state, keyed the same way as the
-/// input measurement groups.
-using DafCandidateMap = std::unordered_map<const Surface*, DafCandidateState>;
 
 /// @}
 

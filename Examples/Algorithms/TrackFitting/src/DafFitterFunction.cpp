@@ -110,9 +110,10 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
       const std::vector<const Acts::Surface*>& surfaceSequence,
       const TrackParameters& initialParameters,
       const GeneralFitterOptions& options,
-      const MeasurementCalibratorAdapter& calibrator,
-      TrackContainer& tracks) const override {
-    const auto dafOptions = makeDafOptions(options, calibrator);
+      const MeasurementCalibratorAdapter& calibrator, TrackContainer& tracks,
+      Acts::DafCandidateMap* finalCandidateState) const override {
+    auto dafOptions = makeDafOptions(options, calibrator);
+    dafOptions.finalCandidateState = finalCandidateState;
     if (useDirectNavigator) {
       // Feed the DirectNavigator the surfaces in proto-track traversal order,
       // exactly as DafTrackFittingAlgorithm assembled them. That order comes

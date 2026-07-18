@@ -25,10 +25,12 @@
 #include "ActsExamples/EventData/Measurement.hpp"
 #include "ActsExamples/EventData/MeasurementCalibration.hpp"
 #include "ActsExamples/Framework/AlgorithmContext.hpp"
+#include "ActsExamples/Utilities/Paths.hpp"
 #include "ActsExamples/Validation/TrackClassification.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -125,6 +127,17 @@ ProcessCode DafTrackFittingAlgorithm::execute(
   trackContainer->reserve(protoTracks.size());
   trackStateContainer->reserve(protoTracks.size() * 30);
   tracks.addColumn<std::size_t>("protoId");
+
+  // Optional per-event export of the DAF's final candidate weights (one row
+  // per candidate per fitted track). Safe per-event even with a parallel
+  // sequencer, since every event writes its own file.
+  std::ofstream candidatesCsv;
+  if (!m_cfg.outputCandidatesDir.empty()) {
+    candidatesCsv.open(perEventFilepath(
+        m_cfg.outputCandidatesDir, "daf-candidates.csv", ctx.eventNumber));
+    candidatesCsv
+        << "proto_track_id,track_id,geometry_id,measurement_id,weight,chi2,won\n";
+  }
 
   // Perform the fit for each input track. For every surface a proto track
   // touches, re-derive the full set of competing candidates from the raw
@@ -239,11 +252,37 @@ ProcessCode DafTrackFittingAlgorithm::execute(
     ACTS_VERBOSE("Invoke DAF fitter for track "
                  << itrack << " with " << measurementGroups.size()
                  << " surface group(s)");
-    auto result = (*m_cfg.fit)(measurementGroups, orderedSurfaces, initialParams,
-                               options, calibrator, tracks);
+    Acts::DafCandidateMap finalCandidateState;
+    auto result = (*m_cfg.fit)(
+        measurementGroups, orderedSurfaces, initialParams, options, calibrator,
+        tracks, candidatesCsv.is_open() ? &finalCandidateState : nullptr);
 
     if (result.ok()) {
       auto& track = result.value();
+      if (candidatesCsv.is_open()) {
+        for (const Acts::Surface* surface : orderedSurfaces) {
+          auto stateIt = finalCandidateState.find(surface);
+          if (stateIt == finalCandidateState.end()) {
+            continue;
+          }
+          const auto& candState = stateIt->second;
+          std::size_t bestIdx = 0;
+          for (std::size_t i = 1; i < candState.weights.size(); ++i) {
+            if (candState.weights[i] > candState.weights[bestIdx]) {
+              bestIdx = i;
+            }
+          }
+          for (std::size_t i = 0; i < candState.candidates.size(); ++i) {
+            const auto& sourceLink =
+                candState.candidates[i].get<IndexSourceLink>();
+            candidatesCsv << itrack << ',' << track.index() << ','
+                          << surface->geometryId().value() << ','
+                          << sourceLink.index() << ',' << candState.weights[i]
+                          << ',' << candState.chi2[i] << ','
+                          << (i == bestIdx ? 1 : 0) << '\n';
+          }
+        }
+      }
       if (track.hasReferenceSurface()) {
         track.template component<std::size_t>("protoId") = itrack;
         ACTS_VERBOSE("Fitted parameters for track " << itrack);

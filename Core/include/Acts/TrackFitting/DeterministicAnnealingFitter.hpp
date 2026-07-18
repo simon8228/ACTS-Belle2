@@ -498,6 +498,13 @@ class DeterministicAnnealingFitter {
         }
       }
 
+      // Export the weights this (result-producing) pass consumed -- also
+      // correct for the salvage path, which restores candidateState to the
+      // last good pass's weights before replaying through here.
+      if (dafOptions.finalCandidateState != nullptr) {
+        *dafOptions.finalCandidateState = candidateState;
+      }
+
       return track;
     };
 

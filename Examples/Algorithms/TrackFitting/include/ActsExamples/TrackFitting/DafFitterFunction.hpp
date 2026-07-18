@@ -54,12 +54,16 @@ class DafFitterFunction {
   /// limit. Note the layer sort has its own known blind spot: it isn't
   /// radius-monotonic for low-momentum tracks that curl back radially in
   /// the field, so it is not a full fix either.
+  /// @param finalCandidateState optional out-parameter; when non-null the
+  /// fitter fills it with the final per-surface candidate weights/chi2 the
+  /// returned track was built from (see DafFitterOptions::finalCandidateState)
   virtual TrackFitterResult operator()(
       const std::unordered_map<const Acts::Surface*, Acts::DafMeasurementGroup>&
           measurementGroups,
       const std::vector<const Acts::Surface*>& surfaceSequence,
       const TrackParameters&, const GeneralFitterOptions&,
-      const MeasurementCalibratorAdapter&, TrackContainer&) const = 0;
+      const MeasurementCalibratorAdapter&, TrackContainer&,
+      Acts::DafCandidateMap* finalCandidateState = nullptr) const = 0;
 };
 
 /// Makes a fitter function object for the Deterministic Annealing Filter

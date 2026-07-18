@@ -75,6 +75,13 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
     bool linkForward = false;
     /// Maximum number of propagation steps per track.
     unsigned int maxSteps = 5000;
+    /// (optional) Directory to write per-event `daf-candidates.csv` files
+    /// into: one row per candidate measurement per fitted track, with the
+    /// DAF's final weight/chi2 and whether the candidate won its surface.
+    /// These weights are otherwise internal to the annealing loop; the file
+    /// also links fitted tracks back to their proto track index. Empty
+    /// disables the export.
+    std::string outputCandidatesDir;
   };
 
   /// Constructor of the DAF fitting algorithm
