@@ -173,8 +173,9 @@ ProcessCode DafTrackFittingAlgorithm::execute(
 
     // Truth gate: only candidates truth-matched to the proto track's
     // majority particle are admitted into a surface's competing group.
+    // Irrelevant in protoTrackCandidatesOnly mode, where no pooling happens.
     std::optional<SimBarcode> trackParticle;
-    if (measurementParticlesMap != nullptr) {
+    if (!m_cfg.protoTrackCandidatesOnly && measurementParticlesMap != nullptr) {
       std::vector<ParticleHitCount> particleHitCounts;
       identifyContributingParticles(*measurementParticlesMap, protoTrack,
                                     particleHitCounts);
@@ -205,22 +206,29 @@ ProcessCode DafTrackFittingAlgorithm::execute(
       }
 
       Acts::DafMeasurementGroup group;
-      auto [begin, end] = measurements.orderedIndices().equal_range(geoId);
       std::size_t nRejected = 0;
-      for (auto it = begin; it != end; ++it) {
-        if (trackParticle.has_value()) {
-          auto [pBegin, pEnd] =
-              measurementParticlesMap->equal_range(it->index());
-          const bool sameParticle =
-              std::any_of(pBegin, pEnd, [&](const auto& measParticle) {
-                return measParticle.second == *trackParticle;
-              });
-          if (!sameParticle) {
-            ++nRejected;
-            continue;
+      if (m_cfg.protoTrackCandidatesOnly) {
+        // Trust the proto track's pick verbatim: exactly one candidate per
+        // surface, first pick wins on duplicates (as the KF's try_emplace
+        // keyed by surface does).
+        group.push_back(Acts::SourceLink(IndexSourceLink(geoId, measIndex)));
+      } else {
+        auto [begin, end] = measurements.orderedIndices().equal_range(geoId);
+        for (auto it = begin; it != end; ++it) {
+          if (trackParticle.has_value()) {
+            auto [pBegin, pEnd] =
+                measurementParticlesMap->equal_range(it->index());
+            const bool sameParticle =
+                std::any_of(pBegin, pEnd, [&](const auto& measParticle) {
+                  return measParticle.second == *trackParticle;
+                });
+            if (!sameParticle) {
+              ++nRejected;
+              continue;
+            }
           }
+          group.push_back(Acts::SourceLink(*it));
         }
-        group.push_back(Acts::SourceLink(*it));
       }
       if (group.empty()) {
         // The proto track's own pick at this surface belongs to a different

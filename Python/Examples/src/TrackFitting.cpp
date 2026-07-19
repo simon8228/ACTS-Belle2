@@ -50,7 +50,7 @@ void addTrackFitting(py::module& mex) {
       inputMeasurements, inputProtoTracks, inputInitialTrackParameters,
       inputClusters, inputMeasurementParticlesMap, outputTracks,
       trackingGeometry, fit, pickTrack, calibrator, linkForward, maxSteps,
-      outputCandidatesDir);
+      outputCandidatesDir, protoTrackCandidatesOnly);
 
   {
     py::class_<TrackFitterFunction, std::shared_ptr<TrackFitterFunction>>(
@@ -87,18 +87,20 @@ void addTrackFitting(py::module& mex) {
            FreeToBoundCorrection freeToBoundCorrection,
            std::vector<double> annealingTemperatures, double annealingCutOff,
            std::size_t iterationsPerTemperature, std::size_t maxIterations,
-           bool useDirectNavigator, Logging::Level level) {
+           bool useDirectNavigator, bool useKfSequenceHandling,
+           Logging::Level level) {
           return makeDafFitterFunction(
               std::move(trackingGeometry), std::move(magneticField),
               multipleScattering, energyLoss, freeToBoundCorrection,
               std::move(annealingTemperatures), annealingCutOff,
               iterationsPerTemperature, maxIterations, useDirectNavigator,
-              *getDefaultLogger("Daf", level));
+              useKfSequenceHandling, *getDefaultLogger("Daf", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
         "energyLoss"_a, "freeToBoundCorrection"_a, "annealingTemperatures"_a,
         "annealingCutOff"_a, "iterationsPerTemperature"_a, "maxIterations"_a,
-        "useDirectNavigator"_a = true, "level"_a);
+        "useDirectNavigator"_a = true, "useKfSequenceHandling"_a = false,
+        "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(
         mex, "MeasurementCalibrator");

@@ -8,6 +8,7 @@ acts_add_library(
     src/GlobalChiSquareFitterFunction.cpp
     src/DafFitterFunction.cpp
     src/DafTrackFittingAlgorithm.cpp
+    src/DirectNavigationSequence.cpp
 )
 target_include_directories(
     ActsExamplesTrackFitting

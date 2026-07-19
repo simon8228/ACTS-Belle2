@@ -8,6 +8,7 @@
 
 #include "ActsExamples/TrackFitting/DafFitterFunction.hpp"
 
+#include "Acts/Definitions/Units.hpp"
 #include "Acts/EventData/VectorMultiTrajectory.hpp"
 #include "Acts/EventData/VectorTrackContainer.hpp"
 #include "Acts/Geometry/GeometryIdentifier.hpp"
@@ -21,9 +22,11 @@
 #include "Acts/TrackFitting/detail/DafChiSquareCalculator.hpp"
 #include "Acts/TrackFitting/detail/DafWeightedCombiner.hpp"
 #include "Acts/Utilities/Logger.hpp"
+#include "Acts/Utilities/TrackHelpers.hpp"
 #include "ActsExamples/EventData/IndexSourceLink.hpp"
 #include "ActsExamples/EventData/MeasurementCalibration.hpp"
 #include "ActsExamples/EventData/Track.hpp"
+#include "ActsExamples/TrackFitting/DirectNavigationSequence.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -50,6 +53,12 @@ using namespace ActsExamples;
 struct DafFitterFunctionImpl final : public DafFitterFunction {
   Fitter fitter;
   DirectFitter directFitter;
+  // Plain geometric-Navigator propagator used only for the final
+  // extrapolation to the reference surface after a direct-navigation fit
+  // (the DirectNavigator cannot target a surface outside its sequence).
+  // Mirrors KalmanFitterFunctionImpl, so the DAF picks up the same material
+  // between the innermost hit and the perigee as the KF does.
+  Propagator referencePropagator;
 
   Acts::GainMatrixUpdater dafUpdater;
   Acts::MbfSmoother dafSmoother;
@@ -57,18 +66,30 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   bool multipleScattering = true;
   bool energyLoss = true;
   bool useDirectNavigator = true;
+  bool useKfSequenceHandling = false;
   Acts::FreeToBoundCorrection freeToBoundCorrection;
   Acts::AnnealingUtility::Config annealingConfig;
   std::size_t iterationsPerTemperature = 1;
   std::size_t maxIterations = 100;
 
+  std::vector<const Acts::Surface*> materialSurfaces;
+
   IndexSourceLink::SurfaceAccessor slSurfaceAccessor;
 
-  DafFitterFunctionImpl(Fitter&& f, DirectFitter&& df,
+  DafFitterFunctionImpl(Fitter&& f, DirectFitter&& df, Propagator&& refProp,
                         const Acts::TrackingGeometry& trkGeo)
       : fitter(std::move(f)),
         directFitter(std::move(df)),
-        slSurfaceAccessor{trkGeo} {}
+        referencePropagator(std::move(refProp)),
+        slSurfaceAccessor{trkGeo} {
+    trkGeo.visitSurfaces(
+        [this](const Acts::Surface* srf) {
+          if (srf != nullptr && srf->surfaceMaterial() != nullptr) {
+            materialSurfaces.push_back(srf);
+          }
+        },
+        false);
+  }
 
   template <typename calibrator_t>
   auto makeDafOptions(const GeneralFitterOptions& options,
@@ -115,19 +136,57 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     auto dafOptions = makeDafOptions(options, calibrator);
     dafOptions.finalCandidateState = finalCandidateState;
     if (useDirectNavigator) {
-      // Feed the DirectNavigator the surfaces in proto-track traversal order,
-      // exactly as DafTrackFittingAlgorithm assembled them. That order comes
-      // from the actual pattern-recognized hit sequence and is the only one
-      // reliably monotonic along the real trajectory. Sorting by
-      // geometryId().layer() (as a previous version did) reorders overlap and
-      // same-layer surfaces, and any segment that is not radially monotonic,
-      // into an order the navigator then has to backtrack through -- which for
-      // low-momentum curlers degenerates into an oscillating target search
-      // that burns the entire propagation step budget and fails the fit. (For
-      // a purely radial silicon sequence the two orders coincide, so this only
-      // bites once non-monotonic subdetectors such as the CDC are involved.)
-      return directFitter.fit(measurementGroups, initialParameters, dafOptions,
-                              surfaceSequence, tracks);
+      // The DirectNavigator cannot target the reference (perigee) surface,
+      // which lies outside its sequence: fit without one, then extrapolate
+      // the finished track with the geometric-Navigator referencePropagator
+      // -- exactly as KalmanFitterFunctionImpl does.
+      dafOptions.referenceSurface = nullptr;
+
+      auto runDirectFit =
+          [&](const std::vector<const Acts::Surface*>& sequence)
+          -> TrackFitterResult {
+        auto result = directFitter.fit(measurementGroups, initialParameters,
+                                       dafOptions, sequence, tracks);
+        if (result.ok() && options.referenceSurface != nullptr) {
+          Propagator::Options<> extrapolationOptions(options.geoContext,
+                                                     options.magFieldContext);
+          auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
+              result.value(), *options.referenceSurface, referencePropagator,
+              extrapolationOptions, dafOptions.referenceSurfaceStrategy);
+          if (!extrapolationResult.ok()) {
+            return extrapolationResult.error();
+          }
+        }
+        return result;
+      };
+
+      if (useKfSequenceHandling) {
+        // KF-equivalence mode: run the sequence through the exact same
+        // preparation as KalmanFitterFunctionImpl (straight-line-path sort
+        // from the seed, material-surface injection, 1.5 m path limit) so
+        // both fitters traverse the identical DirectNavigator sequence.
+        std::vector<const Acts::Surface*> sequence = surfaceSequence;
+        prepareDirectNavigationSequence(
+            options.geoContext, initialParameters.position(options.geoContext),
+            initialParameters.direction(), sequence, materialSurfaces);
+        dafOptions.propagatorPlainOptions.pathLimit =
+            1.5 * Acts::UnitConstants::m;
+        return runDirectFit(sequence);
+      }
+
+      // Default: feed the DirectNavigator the surfaces in proto-track
+      // traversal order, exactly as DafTrackFittingAlgorithm assembled them.
+      // That order comes from the actual pattern-recognized hit sequence and
+      // is the only one reliably monotonic along the real trajectory. Sorting
+      // by geometryId().layer() (as a previous version did) reorders overlap
+      // and same-layer surfaces, and any segment that is not radially
+      // monotonic, into an order the navigator then has to backtrack through
+      // -- which for low-momentum curlers degenerates into an oscillating
+      // target search that burns the entire propagation step budget and fails
+      // the fit. (For a purely radial silicon sequence the two orders
+      // coincide, so this only bites once non-monotonic subdetectors such as
+      // the CDC are involved.)
+      return runDirectFit(surfaceSequence);
     }
     return fitter.fit(measurementGroups, initialParameters, dafOptions, tracks);
   }
@@ -143,7 +202,8 @@ ActsExamples::makeDafFitterFunction(
     Acts::FreeToBoundCorrection freeToBoundCorrection,
     std::vector<double> annealingTemperatures, double annealingCutOff,
     std::size_t iterationsPerTemperature, std::size_t maxIterations,
-    bool useDirectNavigator, const Acts::Logger& logger) {
+    bool useDirectNavigator, bool useKfSequenceHandling,
+    const Acts::Logger& logger) {
   // Stepper should be copied into the fitters
   const Stepper stepper(std::move(magneticField));
 
@@ -166,12 +226,20 @@ ActsExamples::makeDafFitterFunction(
   DirectFitter directTrackFitter(std::move(directPropagator),
                                  logger.cloneWithSuffix("DirectFitter"));
 
+  // Geometric-navigation propagator for the post-fit reference-surface
+  // extrapolation of direct-navigation fits.
+  Acts::Navigator refNavigator(cfg, logger.cloneWithSuffix("RefNavigator"));
+  Propagator refPropagator(stepper, std::move(refNavigator),
+                           logger.cloneWithSuffix("RefPropagator"));
+
   // build the fitter function. owns the fitter object.
   auto fitterFunction = std::make_shared<DafFitterFunctionImpl>(
-      std::move(trackFitter), std::move(directTrackFitter), geo);
+      std::move(trackFitter), std::move(directTrackFitter),
+      std::move(refPropagator), geo);
   fitterFunction->multipleScattering = multipleScattering;
   fitterFunction->energyLoss = energyLoss;
   fitterFunction->useDirectNavigator = useDirectNavigator;
+  fitterFunction->useKfSequenceHandling = useKfSequenceHandling;
   fitterFunction->freeToBoundCorrection = freeToBoundCorrection;
   fitterFunction->annealingConfig.setOfTemperatures =
       std::move(annealingTemperatures);

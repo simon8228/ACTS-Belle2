@@ -29,6 +29,7 @@
 #include "ActsExamples/EventData/IndexSourceLink.hpp"
 #include "ActsExamples/EventData/MeasurementCalibration.hpp"
 #include "ActsExamples/EventData/Track.hpp"
+#include "ActsExamples/TrackFitting/DirectNavigationSequence.hpp"
 #include "ActsExamples/TrackFitting/RefittingCalibrator.hpp"
 #include "ActsExamples/TrackFitting/TrackFitterFunction.hpp"
 
@@ -174,53 +175,9 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
         surfaceSequence.push_back(surface);
       }
       if (allResolved) {
-        const Acts::Vector3 seedPosition =
-            initialParameters.position(options.geoContext);
-        const Acts::Vector3 seedDirection = initialParameters.direction();
-        auto pathTo = [&](const Acts::Surface* srf) -> double {
-          auto multiIntersection =
-              srf->intersect(options.geoContext, seedPosition, seedDirection,
-                             Acts::BoundaryTolerance::Infinite());
-          const auto& intersection = multiIntersection.closestForward();
-          if (intersection.status() >= Acts::IntersectionStatus::reachable &&
-              intersection.pathLength() > 0) {
-            return intersection.pathLength();
-          }
-          // No forward intersection of the ray (e.g. nearly parallel
-          // surface): fall back to the projection of the surface center.
-          return (srf->center(options.geoContext) - seedPosition)
-              .dot(seedDirection);
-        };
-        double maxHitPath = 0.;
-        for (const Acts::Surface* srf : surfaceSequence) {
-          auto hitIntersection =
-              srf->intersect(options.geoContext, seedPosition, seedDirection,
-                             Acts::BoundaryTolerance::None());
-          const auto& hitIx = hitIntersection.closestForward();
-          if (hitIx.status() >= Acts::IntersectionStatus::reachable &&
-              hitIx.pathLength() > 0) {
-            maxHitPath = std::max(maxHitPath, hitIx.pathLength());
-          }
-        }
-        for (const Acts::Surface* srf : materialSurfaces) {
-          auto multiIntersection =
-              srf->intersect(options.geoContext, seedPosition, seedDirection,
-                             Acts::BoundaryTolerance::None());
-          const auto& intersection = multiIntersection.closestForward();
-          if (intersection.status() >= Acts::IntersectionStatus::reachable &&
-              intersection.pathLength() > 0 &&
-              intersection.pathLength() < maxHitPath + 1.0) {
-            surfaceSequence.push_back(srf);
-          }
-        }
-
-        std::stable_sort(surfaceSequence.begin(), surfaceSequence.end(),
-                         [&](const Acts::Surface* a, const Acts::Surface* b) {
-                           return pathTo(a) < pathTo(b);
-                         });
-        surfaceSequence.erase(
-            std::unique(surfaceSequence.begin(), surfaceSequence.end()),
-            surfaceSequence.end());
+        prepareDirectNavigationSequence(
+            options.geoContext, initialParameters.position(options.geoContext),
+            initialParameters.direction(), surfaceSequence, materialSurfaces);
 
         auto directKfOptions = kfOptions;
         directKfOptions.referenceSurface = nullptr;

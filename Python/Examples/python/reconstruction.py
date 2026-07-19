@@ -642,10 +642,12 @@ def addMyDafFitter(
     iterationsPerTemperature: int = 1,
     maxIterations: int = 100,
     useDirectNavigator: bool = True,
+    useKfSequenceHandling: bool = False,
     inputMeasurementParticlesMap: str = "measurement_particles_map",
     maxSteps: int = 5000,
     pickTrack: int = -1,
     outputCandidatesDir: str = "",
+    protoTrackCandidatesOnly: bool = False,
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
     collection names and "tracks" whiteboard alias), but fits with the Deterministic
@@ -666,6 +668,14 @@ def addMyDafFitter(
     there: one row per candidate per fitted track with the DAF's final weight/chi2,
     whether it won its surface, and the fitted-track -> proto-track linkage. Used by
     SVD_tracking/visualize_event_daf.py.
+
+    KF-equivalence knobs (both default off; enable together with a degenerate
+    annealing schedule to make a DAF run comparable to addMyFitter's plain KF):
+    `protoTrackCandidatesOnly` trusts the proto track's hit picks verbatim (one
+    candidate per surface, no truth-gated pooling); `useKfSequenceHandling` prepares
+    the DirectNavigator sequence exactly like the KF fitter function (straight-line
+    -path sort from the seed, material-surface injection, 1.5 m path limit) instead
+    of trusting proto-track order.
     """
     customLogLevel = acts.examples.defaultLogging(s, logLevel)
 
@@ -684,6 +694,7 @@ def addMyDafFitter(
         pickTrack=pickTrack,
         maxSteps=maxSteps,
         outputCandidatesDir=outputCandidatesDir,
+        protoTrackCandidatesOnly=protoTrackCandidatesOnly,
         fit=acts.examples.makeDafFitterFunction(
             trackingGeometry,
             field,
@@ -695,6 +706,7 @@ def addMyDafFitter(
             iterationsPerTemperature,
             maxIterations,
             useDirectNavigator=useDirectNavigator,
+            useKfSequenceHandling=useKfSequenceHandling,
             level=customLogLevel(),
         ),
         calibrator=calibrator,

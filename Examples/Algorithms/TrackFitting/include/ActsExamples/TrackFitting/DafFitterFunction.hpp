@@ -43,17 +43,12 @@ class DafFitterFunction {
 
   /// @param measurementGroups Competing candidates, grouped by surface
   /// @param surfaceSequence The proto track traversal order for the
-  /// surfaces, used as the input to drive the DirectNavigator. When
-  /// @ref makeDafFitterFunction's useDirectNavigator is set, the
-  /// implementation re-sorts a copy of this by increasing geometryId layer
-  /// (inner->outer) before propagating, mirroring
-  /// KalmanFitterFunctionImpl -- proto-track order alone was found
-  /// unreliable often enough (pattern recognition does not guarantee true
-  /// spatial traversal order) to cause DirectNavigator to exhaust its
-  /// sequence mid-track and fall back to the propagator's step-count
-  /// limit. Note the layer sort has its own known blind spot: it isn't
-  /// radius-monotonic for low-momentum tracks that curl back radially in
-  /// the field, so it is not a full fix either.
+  /// surfaces, used as the input to drive the DirectNavigator. By default
+  /// it is used as-is (see DafFitterFunction.cpp for why geometric
+  /// re-sorts hurt curlers); with @ref makeDafFitterFunction's
+  /// useKfSequenceHandling a copy is run through the same sequence
+  /// preparation as the KF (seed-path sort, material-surface injection,
+  /// 1.5 m path limit) so both fitters traverse the identical sequence.
   /// @param finalCandidateState optional out-parameter; when non-null the
   /// fitter fills it with the final per-surface candidate weights/chi2 the
   /// returned track was built from (see DafFitterOptions::finalCandidateState)
@@ -78,6 +73,12 @@ class DafFitterFunction {
 /// @param iterationsPerTemperature number of forward+smooth passes run at each temperature
 /// @param maxIterations hard cap on the total number of forward+smooth passes
 /// @param useDirectNavigator whether to use the DirectNavigator over the candidate group surfaces
+/// @param useKfSequenceHandling prepare the DirectNavigator sequence exactly
+/// like the KF fitter function does (straight-line-path sort from the seed,
+/// material-surface injection, 1.5 m path limit) instead of trusting the
+/// proto-track order. Needed for KF-equivalence comparisons and for material
+/// treatment inside the fit; off by default because the proto-track order is
+/// the safer choice for curlers and non-monotonic sequences.
 /// @param logger a logger instance
 std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     std::shared_ptr<const Acts::TrackingGeometry> trackingGeometry,
@@ -88,6 +89,7 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     std::vector<double> annealingTemperatures = {64., 16., 4., 2., 1.5, 1.},
     double annealingCutOff = 9., std::size_t iterationsPerTemperature = 1,
     std::size_t maxIterations = 100, bool useDirectNavigator = true,
+    bool useKfSequenceHandling = false,
     const Acts::Logger& logger = *Acts::getDefaultLogger(
         "Daf", Acts::Logging::INFO));
 

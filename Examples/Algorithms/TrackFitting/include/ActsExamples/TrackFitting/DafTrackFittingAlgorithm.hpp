@@ -82,6 +82,15 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
     /// also links fitted tracks back to their proto track index. Empty
     /// disables the export.
     std::string outputCandidatesDir;
+    /// KF-equivalence mode: trust the proto track's hit choices verbatim
+    /// instead of re-gathering competing candidates per surface. Every
+    /// surface group holds exactly the proto track's own pick (first pick
+    /// wins on duplicate surfaces, mirroring KalmanFitter's try_emplace),
+    /// and the truth gate is bypassed. This degenerates the DAF into a
+    /// Kalman-equivalent fit over the same hits as TrackFittingAlgorithm,
+    /// which is the point: it isolates fitter-core differences in
+    /// KF-vs-DAF comparisons.
+    bool protoTrackCandidatesOnly = false;
   };
 
   /// Constructor of the DAF fitting algorithm
