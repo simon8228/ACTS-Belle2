@@ -174,7 +174,7 @@ Gen3Belle2Builder::buildTrackingGeometry(
   using enum Acts::CylinderVolumeBounds::Face;
   ACTS_INFO("Belle2 construction in  Gen3 mode");
 
-  TGeoManager::Import("/home/configs/Belle2_Beampipe_PXD_SVD.root");
+  TGeoManager::Import("/home/configs/Belle2_Beampipe_PXD_SVD_CDC.root");
   std::string cdcFile = "wireInfo.csv";
 
   Blueprint::Config cfg;
@@ -186,20 +186,10 @@ Gen3Belle2Builder::buildTrackingGeometry(
   Blueprint root{cfg};
 
   root.addCylinderContainer("Detector", AxisR, [&](auto& detector) {
-    // auto beampipeBounds = std::make_unique<Acts::CylinderVolumeBounds>(0_mm,
-    // kBeamPipeRadius, kBeamPipeHalfLengthZ); auto beampipe =
-    // std::make_unique<Acts::TrackingVolume>(Acts::Transform3::Identity(),
-    // std::move(beampipeBounds), "Beampipe");
-    /*
-    detector.addMaterial("BeampipeMaterial", [&](auto& bpMat) {
-        bpMat.configureFace(OuterCylinder, asHomogeneous("Beam pipe",
-    m_beamPipeMaterial)); bpMat.addStaticVolume(std::move(beampipe));
-    });
-    */
     buildBeamPipe(detector, gctx);
     buildPXD(detector, gctx);
     buildSVD(detector, gctx);
-    // buildCDC(detector, gctx);
+    buildCDC(detector, gctx);
   });
 
   if (graphvizFile) {
@@ -215,184 +205,53 @@ Gen3Belle2Builder::buildTrackingGeometry(
   return trackingGeometry;
 }
 
-// void Gen3Belle2Builder::buildBeamPipe(Acts::Experimental::BlueprintNode& parent,
-//                                       const Acts::GeometryContext& gctx) {
-//   using namespace Acts::Experimental;
-//   using namespace Acts::UnitLiterals;
-//   using enum Acts::CylinderVolumeBounds::Face;
 
-//   ACTS_DEBUG("Building Beam Pipe");
+void Gen3Belle2Builder::buildCDC(Acts::Experimental::BlueprintNode& parent,
+                                 const Acts::GeometryContext& gctx) {
+  using namespace Acts::Experimental;
+  using namespace Acts::UnitLiterals;
+  using enum Acts::CylinderVolumeBounds::Face;
 
-//   double beamPipeRadius = 13.0_mm;
-//   double beamPipeHalfZ = 3000.0_mm;
-//   // Inner material surface placed just inside the Be wall.
-//   // halfZ=60mm is large enough for all tracks in eta=[-1.5,+1.9]
-//   // (z_intersection = r/tan(theta) <= 10.5/tan(17deg) ~ 34mm << 60mm).
-//   // Using a dedicated surface avoids adjustBinUtility expanding to +-3000mm,
-//   // which previously caused the single HomogeneousSurface to average over all
-//   // eta tracks and over-estimate material at central eta by ~8x.
-//   double bpMatRadius = 10.5_mm;
-//   double bpMatHalfZ = 90.0_mm;
+  ACTS_DEBUG("Building CDC");
+  auto cdcLayers = buildCDCLayers(gctx);
 
-//   auto bpBounds = std::make_shared<Acts::CylinderVolumeBounds>(
-//       0_mm, beamPipeRadius, beamPipeHalfZ);
+  auto cdcBounds =
+      std::make_shared<Acts::CylinderVolumeBounds>(150_mm, 3000_mm, 3000_mm);
 
-//   parent.addMaterial("BeamPipe_Material", [&](auto& matNode) {
-//     matNode.addStaticVolume(
-//         Acts::Transform3::Identity(), bpBounds, "BeamPipe_Volume",
-//         [&](auto& bpVol) {
-//           bpVol.addLayer("BeamPipe_Layer", [&](auto& bpLayer) {
-//             auto bpSurfBounds =
-//                 std::make_shared<Acts::CylinderBounds>(bpMatRadius, bpMatHalfZ);
-//             auto bpSurf = Acts::Surface::makeShared<Acts::CylinderSurface>(
-//                 Acts::Transform3::Identity(), bpSurfBounds);
+  struct TrackingVolumeAccessor
+      : public Acts::Experimental::StaticBlueprintNode {
+    static Acts::TrackingVolume* getVolume(
+        Acts::Experimental::StaticBlueprintNode& node) {
+      return static_cast<TrackingVolumeAccessor&>(node).m_volume.get();
+    }
+  };
+  parent.addMaterial("CDC_PassiveMaterial", [&](auto& matNode) {
+    using Face = Acts::CylinderVolumeBounds::Face;
+    using enum Acts::AxisDirection;
+    using enum Acts::AxisBoundaryType;
 
-//             if (m_cfg.protoMaterial) {
-//               Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
-//                                   Acts::AxisDirection::AxisPhi);
-//               bu += Acts::BinUtility(100, -bpMatHalfZ, bpMatHalfZ, Acts::open,
-//                                      Acts::AxisDirection::AxisZ);
-//               bpSurf->assignSurfaceMaterial(
-//                   std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-//             } else {
-//               bpSurf->assignSurfaceMaterial(m_beamPipeMaterial);
-//             }
+    matNode.addStaticVolume(
+        Acts::Transform3::Identity(), cdcBounds, "CDC_Container",
+        [&](auto& cdcVol) {
+          // Wire material (gas + wire) is carried on the StrawSurfaces
+          // themselves (assigned in buildCDCLayers). No passive cylinder layers
+          // are added here: any addLayer() call creates a sub-volume that
+          // TryAll visits, which interrupts CKF extension and causes ~30%
+          // efficiency loss.
+          for (size_t i = 0; i < cdcLayers.size(); ++i) {
+            std::string name = "CDC_Layer" + std::to_string(i);
+            cdcVol.addLayer(name, [&](auto& layer) {
+              layer.setProtoLayer(cdcLayers[i].protoLayer);
+              layer.setEnvelope(
+                  Acts::ExtentEnvelope{{.z = {5_mm, 5_mm}, .r = {0_mm, 0_mm}}});
+              layer.setNavigationPolicyFactory(createNavigationPolicy2());
+            });
+          }
+          cdcVol.setNavigationPolicyFactory(createNavigationPolicy2());
+        });
+  });
+}
 
-//             std::vector<std::shared_ptr<Acts::Surface>> bpSurfaces = {bpSurf};
-//             Acts::MutableProtoLayer pl(gctx, bpSurfaces);
-//             bpLayer.setProtoLayer(pl);
-//             bpLayer.setEnvelope(Acts::ExtentEnvelope{
-//                 {.z = {5_mm, 5_mm}, .r = {0.5_mm, 0.5_mm}}});
-//             bpLayer.setNavigationPolicyFactory(createNavigationPolicy2());
-//           });
-//           bpVol.setNavigationPolicyFactory(createNavigationPolicy2());
-//         });
-//   });
-// }
-// void Gen3Belle2Builder::buildPXD(Acts::Experimental::BlueprintNode& parent,
-//                                       const Acts::GeometryContext& gctx) {
-//   using namespace Acts::Experimental;
-//   using namespace Acts::UnitLiterals;
-//   using enum Acts::CylinderVolumeBounds::Face;
-
-//   ACTS_DEBUG("Building PXD");
-
-//   auto pxdLayers = buildPXDLayers(gctx);
-
-//   double pxdRadius = 30.0_mm;
-//   double pxdHalfZ = 90.0_mm;
-//   Acts::Transform3 pxdTransform = Acts::Transform3::Identity();
-//   pxdTransform.translation() = Acts::Vector3(0, 0, 15.0_mm); // Find the correct z-offset of the PXD
-
-//   auto pxdBounds = std::make_shared<Acts::CylinderVolumeBounds>(
-//       13.0_mm, pxdRadius, 120.0_mm);
-
-
-//   parent.addMaterial("PXD_PassiveMaterial", [&](auto& matNode) {
-//     using Face = Acts::CylinderVolumeBounds::Face;
-//     using enum Acts::AxisDirection;
-//     using enum Acts::AxisBoundaryType;
-
-//     // matNode.configureFace(
-//     //     Face::OuterCylinder,
-//     //     Acts::DirectedProtoAxis(AxisRPhi, Closed, -M_PI, M_PI, 120),
-//     //     Acts::DirectedProtoAxis(AxisZ, Open, -100_mm, 120_mm, 110));
-
-//     matNode.addStaticVolume(
-//         pxdTransform, pxdBounds, "PXD_Container",
-//         [&](auto& pxdVol) {
-//           pxdVol.addLayer("PXD_suppLayer1", [&](auto& suppLayer) {
-//             Acts::Transform3 t = Acts::Transform3::Identity();
-//             t.translation() = Acts::Vector3(0, 0, 20_mm);
-//             auto bounds = std::make_shared<Acts::CylinderBounds>(18_mm, 80_mm);
-//             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
-//             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-//             bu += Acts::BinUtility(ns_factor * 320, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
-//             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-//             Acts::MutableProtoLayer pl(gctx, {surf});
-//             suppLayer.setProtoLayer(pl);
-//             suppLayer.setEnvelope(Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-//           });
-//           // pxdVol.addLayer("PXD_suppLayer4", [&](auto& suppLayer) {
-//           //   Acts::Transform3 t = Acts::Transform3::Identity();
-//           //   t.translation() = Acts::Vector3(0, 0, 20_mm);
-//           //   auto bounds = std::make_shared<Acts::CylinderBounds>(16_mm, 80_mm);
-//           //   auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
-//           //   Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-//           //   bu += Acts::BinUtility(320, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
-//           //   surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-//           //   Acts::MutableProtoLayer pl(gctx, {surf});
-//           //   suppLayer.setProtoLayer(pl);
-//           //   suppLayer.setEnvelope(Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-//           // });
-//           pxdVol.addLayer("PXD_suppLayer4", [&](auto& suppLayer) {
-//             Acts::Transform3 t = Acts::Transform3::Identity();
-//             t.translation() = Acts::Vector3(0, 0, -35_mm);
-//             auto bounds = std::make_shared<Acts::CylinderBounds>(16_mm, 12.5_mm);
-//             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
-//             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-//             bu += Acts::BinUtility(ns_factor * 30, -12.5_mm, 12.5_mm, Acts::open, Acts::AxisDirection::AxisZ);
-//             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-//             Acts::MutableProtoLayer pl(gctx, {surf});
-//             suppLayer.setProtoLayer(pl);
-//             suppLayer.setEnvelope(Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-//           });
-//           pxdVol.addLayer("PXD_suppLayer5", [&](auto& suppLayer) {
-//             Acts::Transform3 t = Acts::Transform3::Identity();
-//             t.translation() = Acts::Vector3(0, 0, 65_mm);
-//             auto bounds = std::make_shared<Acts::CylinderBounds>(16_mm, 12.5_mm);
-//             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
-//             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-//             bu += Acts::BinUtility(ns_factor * 30, -12.5_mm, 12.5_mm, Acts::open, Acts::AxisDirection::AxisZ);
-//             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-//             Acts::MutableProtoLayer pl(gctx, {surf});
-//             suppLayer.setProtoLayer(pl);
-//             suppLayer.setEnvelope(Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-//           });
-//           pxdVol.addLayer("PXD_suppLayer2", [&](auto& suppLayer) {
-//             Acts::Transform3 t = Acts::Transform3::Identity();
-//             t.translation() = Acts::Vector3(0, 0, 20_mm);
-//             auto bounds = std::make_shared<Acts::CylinderBounds>(12.5_mm, 80_mm);
-//             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
-//             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-//             bu += Acts::BinUtility(ns_factor * 80, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
-//             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-//             Acts::MutableProtoLayer pl(gctx, {surf});
-//             suppLayer.setProtoLayer(pl);
-//             suppLayer.setEnvelope(Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-//           });
-//           pxdVol.addLayer("PXD_suppLayer3", [&](auto& suppLayer) {
-//             Acts::Transform3 t = Acts::Transform3::Identity();
-//             t.translation() = Acts::Vector3(0, 0, 20_mm);
-//             auto bounds = std::make_shared<Acts::CylinderBounds>(30_mm, 80_mm);
-//             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
-//             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed, Acts::AxisDirection::AxisPhi);
-//             bu += Acts::BinUtility(ns_factor * 80, -80_mm, 80_mm, Acts::open, Acts::AxisDirection::AxisZ);
-//             surf->assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
-//             Acts::MutableProtoLayer pl(gctx, {surf});
-//             suppLayer.setProtoLayer(pl);
-//             suppLayer.setEnvelope(Acts::ExtentEnvelope{{.z = {1_mm, 1_mm}, .r = {1_mm, 1_mm}}});
-//           });
-
-//           for (int i = 0; i < 2; ++i) {
-//             std::string name = "PXD_Layer" + std::to_string(i + 1);
-
-//             pxdVol.addLayer(name, [&](auto& layer) {
-//               layer.setProtoLayer(pxdLayers[i].protoLayer);
-
-//               layer.setEnvelope(
-//                   Acts::ExtentEnvelope{{.z = {5_mm, 5_mm}, .r = {5_mm, 5_mm}}});
-
-//               layer.setNavigationPolicyFactory(createNavigationPolicy3(
-//                   LayerType::Cylinder,
-//                   std::make_pair(pxdLayers[i].bins0, pxdLayers[i].bins1)));
-//             });
-//           }
-
-//           pxdVol.setNavigationPolicyFactory(createNavigationPolicy2());
-//         });
-//   });
-// }
 
 std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildCDCLayers(
     const Acts::GeometryContext& gctx) {
@@ -496,7 +355,6 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildCDCLayers(
     auto wireElement =
         std::make_shared<CDCWireElement>(geoId, transform, bounds, 1.0);
     wireElement->surface().assignGeometryId(geoId);
-    // wireElement->surface().assignSurfaceMaterial(std::make_shared<Acts::ProtoSurfaceMaterial>());
 
     surfacesByLayer[layerIndex].push_back(
         wireElement->surface().getSharedPtr());
