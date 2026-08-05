@@ -326,6 +326,16 @@ class DafActor {
                     : TrackStatePropMask::Calibrated;
         auto candidate =
             scratchStates->makeTrackState(candidateMask, kTrackIndexInvalid);
+        // Surface-aware calibrators read the reference surface of the state
+        // they are handed -- e.g. ActsExamples' DriftChamberCalibrator needs
+        // the straw type to know it must sign the drift radius at all, and the
+        // wire position to re-evaluate the x-t relation. KalmanFitter's actor
+        // sets it on its single track state before calibrating; these scratch
+        // candidates are never attached to the output trajectory, so this is
+        // the only place they can get one. Without it such a calibrator
+        // dereferences a null surface (the assert is compiled out in
+        // -DNDEBUG builds).
+        candidate.setReferenceSurface(surface.getSharedPtr());
         if (i == 0) {
           candidate.predicted() = trackStateProxy.predicted();
           candidate.predictedCovariance() = trackStateProxy.predictedCovariance();

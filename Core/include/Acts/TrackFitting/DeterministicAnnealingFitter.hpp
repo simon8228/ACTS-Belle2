@@ -271,6 +271,15 @@ class DeterministicAnnealingFitter {
                        TrackStatePropMask::Calibrated)
                     : TrackStatePropMask::Calibrated;
         auto candidate = scratchStates.makeTrackState(mask, kTrackIndexInvalid);
+        // Same reason as in DafActor::filter: a surface-aware calibrator needs
+        // the reference surface, and these scratch states are the only ones it
+        // sees here. Note the sign a state-dependent calibrator picks in this
+        // pass comes from the smoothed state, whereas the forward pass signed
+        // it from the predicted one -- so a hit sitting almost on its wire can
+        // be weighted against a differently-signed measurement than the one
+        // the update consumed. That is inherent to resolving left/right
+        // greedily inside the calibrator rather than as competing candidates.
+        candidate.setReferenceSurface(surface->getSharedPtr());
         if (i == 0) {
           candidate.predicted() = ts.smoothed();
           candidate.predictedCovariance() = ts.smoothedCovariance();

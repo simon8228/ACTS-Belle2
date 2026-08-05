@@ -29,6 +29,8 @@
 #include "ActsExamples/TrackFitting/DirectNavigationSequence.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -47,6 +49,73 @@ using DirectFitter =
 using TrackContainer =
     Acts::TrackContainer<Acts::VectorTrackContainer,
                          Acts::VectorMultiTrajectory, std::shared_ptr>;
+
+
+namespace {
+/// Tuning knobs for the direct-navigation fit, read once from the environment
+/// so a single build can be A/B tested without a rebuild:
+///   ACTS_MATERIAL_VOLUMES="19-74"  -- restrict the material surfaces offered
+///        to the sequence to these geometry volume ids (comma separated ids or
+///        lo-hi ranges). In the Belle II geometry 14-18 are the 172 SVD sensor
+///        modules, 19-74 the 56 CDC layer cylinders, 1-13 beam pipe/PXD. A
+///        CDC-only fit does not need the SVD sensors, and every extra surface
+///        is one more the DirectNavigator has to walk. Empty => no restriction.
+///   ACTS_MAX_STEPS=N               -- override the propagator step budget
+///        (Acts default 15000). Empty => leave as configured.
+std::vector<std::pair<unsigned, unsigned>> materialVolumeRanges() {
+  static const std::vector<std::pair<unsigned, unsigned>> ranges = [] {
+    std::vector<std::pair<unsigned, unsigned>> out;
+    const char* env = std::getenv("ACTS_MATERIAL_VOLUMES");
+    if (env == nullptr || *env == 0) {
+      return out;
+    }
+    std::string spec(env);
+    std::size_t pos = 0;
+    while (pos < spec.size()) {
+      std::size_t comma = spec.find(',', pos);
+      std::string tok = spec.substr(pos, comma == std::string::npos
+                                             ? std::string::npos
+                                             : comma - pos);
+      std::size_t dash = tok.find('-');
+      if (dash == std::string::npos) {
+        const unsigned v = std::strtoul(tok.c_str(), nullptr, 10);
+        out.emplace_back(v, v);
+      } else {
+        out.emplace_back(std::strtoul(tok.substr(0, dash).c_str(), nullptr, 10),
+                         std::strtoul(tok.substr(dash + 1).c_str(), nullptr, 10));
+      }
+      if (comma == std::string::npos) {
+        break;
+      }
+      pos = comma + 1;
+    }
+    return out;
+  }();
+  return ranges;
+}
+
+bool materialVolumeAccepted(unsigned volume) {
+  const auto& ranges = materialVolumeRanges();
+  if (ranges.empty()) {
+    return true;
+  }
+  for (const auto& [lo, hi] : ranges) {
+    if (volume >= lo && volume <= hi) {
+      return true;
+    }
+  }
+  return false;
+}
+
+unsigned maxStepsOverride() {
+  static const unsigned value = [] {
+    const char* env = std::getenv("ACTS_MAX_STEPS");
+    return env == nullptr ? 0u
+                          : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+  }();
+  return value;
+}
+}  // namespace
 
 using namespace ActsExamples;
 
@@ -74,17 +143,47 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
 
   std::vector<const Acts::Surface*> materialSurfaces;
 
+  // Kept so the direct-navigation branch can work out the seed curvature; the
+  // stepper owns its own copy.
+  std::shared_ptr<const Acts::MagneticFieldProvider> magneticField;
+
   IndexSourceLink::SurfaceAccessor slSurfaceAccessor;
 
+  /// Signed transverse radius of the seed helix, in ACTS length units. Zero
+  /// when it cannot be determined, which makes the sequence preparation fall
+  /// back to straight-line paths. Mirrors KalmanFitterFunctionImpl.
+  double seedSignedRadius(const TrackParameters& params,
+                          const GeneralFitterOptions& options) const {
+    if (magneticField == nullptr) {
+      return 0.;
+    }
+    auto cache = magneticField->makeCache(options.magFieldContext);
+    auto field =
+        magneticField->getField(params.position(options.geoContext), cache);
+    if (!field.ok()) {
+      return 0.;
+    }
+    const double bz = field.value().z();
+    const double qOverP = params.parameters()[Acts::eBoundQOverP];
+    if (std::abs(bz) < 1e-12 || std::abs(qOverP) < 1e-12) {
+      return 0.;
+    }
+    return std::sin(params.parameters()[Acts::eBoundTheta]) / (qOverP * bz);
+  }
+
   DafFitterFunctionImpl(Fitter&& f, DirectFitter&& df, Propagator&& refProp,
-                        const Acts::TrackingGeometry& trkGeo)
+                        const Acts::TrackingGeometry& trkGeo,
+                        std::shared_ptr<const Acts::MagneticFieldProvider> bField)
       : fitter(std::move(f)),
         directFitter(std::move(df)),
         referencePropagator(std::move(refProp)),
+        magneticField(std::move(bField)),
         slSurfaceAccessor{trkGeo} {
     trkGeo.visitSurfaces(
         [this](const Acts::Surface* srf) {
-          if (srf != nullptr && srf->surfaceMaterial() != nullptr) {
+          if (srf != nullptr && srf->surfaceMaterial() != nullptr &&
+              materialVolumeAccepted(
+                  static_cast<unsigned>(srf->geometryId().volume()))) {
             materialSurfaces.push_back(srf);
           }
         },
@@ -166,11 +265,18 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
         // from the seed, material-surface injection, 1.5 m path limit) so
         // both fitters traverse the identical DirectNavigator sequence.
         std::vector<const Acts::Surface*> sequence = surfaceSequence;
-        prepareDirectNavigationSequence(
+        const double sequenceSpan = prepareDirectNavigationSequence(
             options.geoContext, initialParameters.position(options.geoContext),
-            initialParameters.direction(), sequence, materialSurfaces);
+            initialParameters.direction(), sequence, materialSurfaces,
+            seedSignedRadius(initialParameters, options));
+        // Sized from the sequence rather than fixed: a constant 1.5 m
+        // truncates curlers, whose arc length grows as the momentum falls.
         dafOptions.propagatorPlainOptions.pathLimit =
-            1.5 * Acts::UnitConstants::m;
+            std::max(1.5 * Acts::UnitConstants::m,
+                     1.5 * sequenceSpan + 0.5 * Acts::UnitConstants::m);
+        if (maxStepsOverride() > 0) {
+          dafOptions.propagatorPlainOptions.maxSteps = maxStepsOverride();
+        }
         return runDirectFit(sequence);
       }
 
@@ -204,7 +310,9 @@ ActsExamples::makeDafFitterFunction(
     std::size_t iterationsPerTemperature, std::size_t maxIterations,
     bool useDirectNavigator, bool useKfSequenceHandling,
     const Acts::Logger& logger) {
-  // Stepper should be copied into the fitters
+  // Stepper should be copied into the fitters. Keep a handle on the field
+  // first: the direct-navigation branch needs it to size the seed curvature.
+  auto fieldForCurvature = magneticField;
   const Stepper stepper(std::move(magneticField));
 
   // Standard fitter
@@ -235,7 +343,7 @@ ActsExamples::makeDafFitterFunction(
   // build the fitter function. owns the fitter object.
   auto fitterFunction = std::make_shared<DafFitterFunctionImpl>(
       std::move(trackFitter), std::move(directTrackFitter),
-      std::move(refPropagator), geo);
+      std::move(refPropagator), geo, std::move(fieldForCurvature));
   fitterFunction->multipleScattering = multipleScattering;
   fitterFunction->energyLoss = energyLoss;
   fitterFunction->useDirectNavigator = useDirectNavigator;

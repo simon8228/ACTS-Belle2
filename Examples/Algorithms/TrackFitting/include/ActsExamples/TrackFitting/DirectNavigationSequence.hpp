@@ -20,23 +20,38 @@ class Surface;
 namespace ActsExamples {
 
 /// Prepare a DirectNavigator surface sequence for a fit: inject the material
-/// surfaces reachable within the hit span (straight-line path below the
-/// farthest hit surface + 1 mm), sort everything by straight-line path from
-/// the seed, and drop duplicates. Shared by the KF and (in KF-equivalence
-/// mode) the DAF fitter functions so both fits traverse the identical
-/// sequence.
+/// surfaces reachable within the hit span, place them among the hits, and drop
+/// duplicates. Shared by the KF and (in KF-equivalence mode) the DAF fitter
+/// functions so both fits traverse the identical sequence.
+///
+/// Everything is ordered by path from the seed. The DirectNavigator walks the
+/// sequence blindly, so the order must be monotonic along the trajectory --
+/// otherwise it backtracks and exhausts the step budget (PropagatorError:2).
+///
+/// Paths are measured along the helix when @p signedHelixRadius is given.
+/// Ordering by the straight-line ray instead -- as this function used to do --
+/// is only valid while the trajectory is nearly straight: for a low-pT curler
+/// the seed tangent bears no relation to the real path, which scrambles the
+/// sequence and collapses fit efficiency in the lowest pT bins.
 ///
 /// @param geoContext The geometry context
-/// @param seedPosition Seed position the straight-line paths are measured from
-/// @param seedDirection Seed direction defining the straight line
-/// @param surfaceSequence In: the hit surfaces; out: sorted, deduplicated,
-///        with material surfaces injected
+/// @param seedPosition Seed position the paths are measured from
+/// @param seedDirection Seed direction at @p seedPosition
+/// @param surfaceSequence In: the hit surfaces in traversal order; out: the
+///        same order with material surfaces placed among them, deduplicated
 /// @param materialSurfaces All surfaces of the geometry carrying material,
 ///        candidates for injection
-void prepareDirectNavigationSequence(
+/// @param signedHelixRadius Signed transverse radius of the seed helix, sign
+///        giving the turning sense. Pass 0 (the default) for no curvature
+///        information, which falls back to straight-line paths.
+/// @return The path length spanned by the prepared sequence, for the caller to
+///         size the propagator's path limit with. A fixed limit truncates
+///         curlers, whose arc length grows as the momentum falls.
+double prepareDirectNavigationSequence(
     const Acts::GeometryContext& geoContext,
     const Acts::Vector3& seedPosition, const Acts::Vector3& seedDirection,
     std::vector<const Acts::Surface*>& surfaceSequence,
-    const std::vector<const Acts::Surface*>& materialSurfaces);
+    const std::vector<const Acts::Surface*>& materialSurfaces,
+    double signedHelixRadius = 0.);
 
 }  // namespace ActsExamples

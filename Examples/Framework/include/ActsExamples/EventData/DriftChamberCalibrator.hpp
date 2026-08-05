@@ -9,6 +9,11 @@ namespace ActsExamples {
 
 class DriftChamberCalibrator : public MeasurementCalibrator {
 public:
+  /// The x-t re-evaluation reads its per-hit linearisation out of the cluster
+  /// container (see calibrate()), so the fitting algorithm must be given one.
+  /// Without this it silently receives a nullptr and the correction never runs.
+  bool needsClusters() const override { return true; }
+
   void calibrate(
       const MeasurementContainer& measurements,
       const ClusterContainer* clusters, 
