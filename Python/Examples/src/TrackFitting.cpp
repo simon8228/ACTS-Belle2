@@ -50,7 +50,8 @@ void addTrackFitting(py::module& mex) {
       inputMeasurements, inputProtoTracks, inputInitialTrackParameters,
       inputClusters, inputMeasurementParticlesMap, outputTracks,
       trackingGeometry, fit, pickTrack, calibrator, linkForward, maxSteps,
-      outputCandidatesDir, protoTrackCandidatesOnly);
+      outputCandidatesDir, outputWeightTrace, weightTraceEvents,
+      protoTrackCandidatesOnly);
 
   {
     py::class_<TrackFitterFunction, std::shared_ptr<TrackFitterFunction>>(
@@ -88,19 +89,25 @@ void addTrackFitting(py::module& mex) {
            std::vector<double> annealingTemperatures, double annealingCutOff,
            std::size_t iterationsPerTemperature, std::size_t maxIterations,
            bool useDirectNavigator, bool useKfSequenceHandling,
+           double strawInitialWeightRadiusFactor,
+           bool useMomentMatchedCombiner, double reseedCovarianceScaling,
            Logging::Level level) {
           return makeDafFitterFunction(
               std::move(trackingGeometry), std::move(magneticField),
               multipleScattering, energyLoss, freeToBoundCorrection,
               std::move(annealingTemperatures), annealingCutOff,
               iterationsPerTemperature, maxIterations, useDirectNavigator,
-              useKfSequenceHandling, *getDefaultLogger("Daf", level));
+              useKfSequenceHandling, strawInitialWeightRadiusFactor,
+              useMomentMatchedCombiner, reseedCovarianceScaling,
+              *getDefaultLogger("Daf", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
         "energyLoss"_a, "freeToBoundCorrection"_a, "annealingTemperatures"_a,
         "annealingCutOff"_a, "iterationsPerTemperature"_a, "maxIterations"_a,
         "useDirectNavigator"_a = true, "useKfSequenceHandling"_a = false,
-        "level"_a);
+        "strawInitialWeightRadiusFactor"_a = 0.,
+        "useMomentMatchedCombiner"_a = false,
+        "reseedCovarianceScaling"_a = 1., "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(
         mex, "MeasurementCalibrator");
@@ -109,9 +116,19 @@ void addTrackFitting(py::module& mex) {
             []() -> std::shared_ptr<MeasurementCalibrator> {
               return std::make_shared<PassThroughCalibrator>();
             });
+    // Kalman: one unsigned drift circle per wire, so the side is taken from the
+    // prediction.
     mex.def("makeDriftChamberCalibrator",
         []() -> std::shared_ptr<MeasurementCalibrator> {
-          return std::make_shared<ActsExamples::DriftChamberCalibrator>();
+          return std::make_shared<ActsExamples::DriftChamberCalibrator>(
+              ActsExamples::DriftSignPolicy::FromPrediction);
+        });
+    // DAF: both mirror candidates live on the same surface and the annealing
+    // decides between them, so the exported sign must survive calibration.
+    mex.def("makeDriftChamberDafCalibrator",
+        []() -> std::shared_ptr<MeasurementCalibrator> {
+          return std::make_shared<ActsExamples::DriftChamberCalibrator>(
+              ActsExamples::DriftSignPolicy::Preserve);
         });
             
 

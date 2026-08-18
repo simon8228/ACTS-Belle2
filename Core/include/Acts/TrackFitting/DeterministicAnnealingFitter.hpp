@@ -8,8 +8,11 @@
 
 #pragma once
 
+#include "Acts/EventData/MeasurementHelpers.hpp"
 #include "Acts/EventData/MultiTrajectory.hpp"
 #include "Acts/EventData/SourceLink.hpp"
+#include "Acts/EventData/SubspaceHelpers.hpp"
+#include "Acts/EventData/TrackParameterHelpers.hpp"
 #include "Acts/EventData/TrackContainer.hpp"
 #include "Acts/EventData/VectorMultiTrajectory.hpp"
 #include "Acts/EventData/VectorTrackContainer.hpp"
@@ -35,6 +38,7 @@
 #include <sstream>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -151,7 +155,8 @@ class DeterministicAnnealingFitter {
           measurementGroups,
       const DafFitterOptions<traj_t>& dafOptions,
       const std::vector<const Surface*>* sSequence,
-      DafCandidateMap& candidateState, traj_t& scratchStates) const {
+      DafCandidateMap& candidateState, traj_t& scratchStates,
+      bool firstPass = false) const {
     using DafActorT = Actor;
     using Actors = ActorList<DafActorT>;
     using PropagatorOptions = typename propagator_t::template Options<Actors>;
@@ -182,6 +187,10 @@ class DeterministicAnnealingFitter {
     dafActor.actorLogger = m_actorLogger.get();
     dafActor.candidateState = &candidateState;
     dafActor.scratchStates = &scratchStates;
+    dafActor.firstPass = firstPass;
+    dafActor.stallStepLimit = dafOptions.stallStepLimit;
+    dafActor.strawInitialWeightRadiusFactor =
+        dafOptions.strawInitialWeightRadiusFactor;
 
     return propagatorOptions;
   }
@@ -263,6 +272,48 @@ class DeterministicAnnealingFitter {
       }
       const DafMeasurementGroup& group = groupIt->second;
 
+      // The state the candidates are scored against. By default the smoothed
+      // state; optionally that state with this surface's own measurement
+      // subtracted again, so a surface does not vote on itself. See
+      // DafFitterOptions::useUnbiasedSmoothedState.
+      BoundVector refParams = ts.smoothed();
+      BoundSquareMatrix refCov = ts.smoothedCovariance();
+      if (dafOptions.useUnbiasedSmoothedState) {
+        visit_measurement(ts.calibratedSize(), [&](auto N) {
+          constexpr std::size_t kMeasurementSize = decltype(N)::value;
+          const auto meas = ts.template calibrated<kMeasurementSize>();
+          const auto measCov =
+              ts.template calibratedCovariance<kMeasurementSize>();
+          const FixedBoundSubspaceHelper<kMeasurementSize> subspaceHelper(
+              ts.template projectorSubspaceIndices<kMeasurementSize>());
+          const auto H = subspaceHelper.projector();
+
+          const SquareMatrix<kMeasurementSize> measInfo = measCov.inverse();
+          const BoundSquareMatrix infoSmoothed = refCov.inverse();
+          const BoundSquareMatrix infoUnbiased =
+              infoSmoothed - H.transpose() * measInfo * H;
+
+          // Catastrophic cancellation whenever the measurement dominates the
+          // prior: the subtraction then leaves a matrix that is not positive
+          // definite, and the Cholesky decomposition is the cheap way to say
+          // so. Keeping the biased state is the safe fallback -- it is what
+          // the fitter did before this option existed.
+          const Eigen::LLT<BoundSquareMatrix> llt(infoUnbiased);
+          if (llt.info() != Eigen::Success) {
+            ACTS_VERBOSE("Unbiased smoothed state on surface "
+                         << surface->geometryId()
+                         << " is not positive definite; scoring against the "
+                            "biased smoothed state instead");
+            return;
+          }
+          const BoundSquareMatrix covUnbiased = infoUnbiased.inverse();
+          refParams = normalizeBoundParameters(
+              covUnbiased * (infoSmoothed * refParams -
+                             H.transpose() * measInfo * meas));
+          refCov = covUnbiased;
+        });
+      }
+
       std::vector<typename traj_t::TrackStateProxy> candidates;
       candidates.reserve(group.size());
       for (std::size_t i = 0; i < group.size(); ++i) {
@@ -271,18 +322,13 @@ class DeterministicAnnealingFitter {
                        TrackStatePropMask::Calibrated)
                     : TrackStatePropMask::Calibrated;
         auto candidate = scratchStates.makeTrackState(mask, kTrackIndexInvalid);
-        // Same reason as in DafActor::filter: a surface-aware calibrator needs
-        // the reference surface, and these scratch states are the only ones it
-        // sees here. Note the sign a state-dependent calibrator picks in this
-        // pass comes from the smoothed state, whereas the forward pass signed
-        // it from the predicted one -- so a hit sitting almost on its wire can
-        // be weighted against a differently-signed measurement than the one
-        // the update consumed. That is inherent to resolving left/right
-        // greedily inside the calibrator rather than as competing candidates.
+        // Same reason as in DafActor: a calibrator may need the surface it is
+        // calibrating against, and these scratch states are not part of any
+        // trajectory that would otherwise set it.
         candidate.setReferenceSurface(surface->getSharedPtr());
         if (i == 0) {
-          candidate.predicted() = ts.smoothed();
-          candidate.predictedCovariance() = ts.smoothedCovariance();
+          candidate.predicted() = refParams;
+          candidate.predictedCovariance() = refCov;
         } else {
           candidate.shareFrom(candidates.front(), TrackStatePropMask::Predicted);
         }
@@ -318,6 +364,11 @@ class DeterministicAnnealingFitter {
       }
       candState.weights = weights;
       candState.chi2 = chi2s;
+      // Where this pass's own smoothed track crossed the surface, in the same
+      // local coordinate the candidates use. Recorded alongside the weights
+      // so a trace can show the track moving as the weights that pull it
+      // change, rather than only the final trajectory.
+      candState.trackLoc0 = ts.smoothed()[eBoundLoc0];
     }
   }
 
@@ -447,6 +498,68 @@ class DeterministicAnnealingFitter {
       return ss.str();
     };
 
+    // Snapshot the working candidate state into the caller's trace, if one was
+    // asked for. Called once per pass: the state is overwritten in place
+    // otherwise, so this copy is the only record of how the weights got to
+    // where they ended up.
+    auto recordTrace = [&](std::size_t iteration, bool isFinal) {
+      if (dafOptions.candidateTrace == nullptr) {
+        return;
+      }
+      DafCandidateTraceEntry entry;
+      entry.iteration = iteration;
+      entry.temperature =
+          dafOptions.annealingConfig
+              .setOfTemperatures[annealingState.currentTemperatureIndex];
+      entry.isFinal = isFinal;
+      entry.state = candidateState;
+      dafOptions.candidateTrace->push_back(std::move(entry));
+    };
+
+    // The sequence each pass actually navigates. Starts as the caller's, and is
+    // rebuilt from the pass's own re-seeded parameters when
+    // DafFitterOptions::rebuildSequence is set -- see there for why. Owned here
+    // so the pointer handed to make_propagator_options stays valid.
+    std::vector<const Surface*> passSequence;
+    if (sSequence != nullptr) {
+      passSequence = *sSequence;
+    }
+    const std::vector<const Surface*>* passSequencePtr =
+        sSequence != nullptr ? &passSequence : nullptr;
+
+    // Rebuild passSequence for a pass, or leave it alone. Refuses a rebuilt
+    // sequence that has lost a measurement-group surface: DafActor would then
+    // never satisfy its termination condition and the pass would burn to the
+    // path limit. Falling back costs this pass its re-linearisation; accepting
+    // would cost the whole track.
+    auto rebuildSequenceFor = [&](const BoundTrackParameters& seed,
+                                  bool allowRebuild) {
+      if (!allowRebuild || sSequence == nullptr ||
+          !dafOptions.rebuildSequence) {
+        return;
+      }
+      std::vector<const Surface*> rebuilt = dafOptions.rebuildSequence(seed);
+      if (rebuilt.empty()) {
+        ACTS_DEBUG("Sequence rebuild returned nothing; keeping the previous "
+                   "pass's sequence");
+        return;
+      }
+      const std::unordered_set<const Surface*> present(rebuilt.begin(),
+                                                       rebuilt.end());
+      for (const auto& [surface, group] : measurementGroups) {
+        (void)group;
+        if (!present.contains(surface)) {
+          ACTS_DEBUG("Rebuilt sequence dropped measurement surface "
+                     << surface->geometryId()
+                     << "; keeping the previous pass's sequence");
+          return;
+        }
+      }
+      passSequence = std::move(rebuilt);
+      ACTS_VERBOSE("Rebuilt the navigation sequence from this pass's seed: "
+                   << passSequence.size() << " surfaces");
+    };
+
     // One-line convergence story: chi2 of every pass, with '|' marking the
     // annealing temperature steps, plus the weights the fit ended on.
     auto logFitSummary = [&](const char* outcome, double finalChi2) {
@@ -470,12 +583,15 @@ class DeterministicAnnealingFitter {
     // the given seed and whatever weights candidateState currently holds, then
     // extrapolates to the reference surface. This is the "official" result-
     // producing pass, shared by the normal final iteration and by salvaging.
-    auto finalizeInto =
-        [&](const BoundTrackParameters& seed) -> Result<TrackProxy> {
+    auto finalizeInto = [&](const BoundTrackParameters& seed,
+                            bool firstPass) -> Result<TrackProxy> {
+      // Not on the first pass: there the seed IS the caller's, so the rebuild
+      // would reproduce the sequence it was already handed.
+      rebuildSequenceFor(seed, !firstPass);
       scratchCandidateStates.clear();
       auto propagatorOptions = make_propagator_options(
-          measurementGroups, dafOptions, sSequence, candidateState,
-          scratchCandidateStates);
+          measurementGroups, dafOptions, passSequencePtr, candidateState,
+          scratchCandidateStates, firstPass);
 
       auto forwardResult = filter_impl(seed, propagatorOptions, trackContainer);
       if (!forwardResult.ok()) {
@@ -513,6 +629,11 @@ class DeterministicAnnealingFitter {
       if (dafOptions.finalCandidateState != nullptr) {
         *dafOptions.finalCandidateState = candidateState;
       }
+      // Close the trace with the same weights, flagged as the pass whose
+      // output the caller actually got. On the salvage path this is the
+      // restored last-good state, so the trace stays consistent with the
+      // returned track rather than ending on the failed pass.
+      recordTrace(chi2History.size(), /*isFinal=*/true);
 
       return track;
     };
@@ -529,7 +650,7 @@ class DeterministicAnnealingFitter {
                  << "); salvaging last successful pass instead of failing the "
                     "fit");
       candidateState = lastGoodCandidateState;
-      auto salvaged = finalizeInto(*lastGoodSeed);
+      auto salvaged = finalizeInto(*lastGoodSeed, false);
       if (!salvaged.ok()) {
         ACTS_DEBUG("Salvage pass unexpectedly failed: " << salvaged.error());
         return salvaged.error();
@@ -557,7 +678,7 @@ class DeterministicAnnealingFitter {
                  << " pT=" << currentSeed.transverseMomentum());
 
       if (isFinalIteration) {
-        auto finalTrack = finalizeInto(currentSeed);
+        auto finalTrack = finalizeInto(currentSeed, iter == 0);
         if (finalTrack.ok()) {
           logFitSummary("finished", finalTrack.value().chi2());
           return finalTrack.value();
@@ -566,10 +687,11 @@ class DeterministicAnnealingFitter {
         return salvage(finalTrack.error());
       }
 
+      rebuildSequenceFor(currentSeed, iter > 0);
       scratchCandidateStates.clear();
       auto propagatorOptions = make_propagator_options(
-          measurementGroups, dafOptions, sSequence, candidateState,
-          scratchCandidateStates);
+          measurementGroups, dafOptions, passSequencePtr, candidateState,
+          scratchCandidateStates, iter == 0);
 
       scratchTrackContainer.clear();
       auto forwardResult = filter_impl(currentSeed, propagatorOptions,
@@ -602,9 +724,19 @@ class DeterministicAnnealingFitter {
       auto firstMeasurement = findFirstMeasurementState(forwardTrack);
       if (firstMeasurement.ok()) {
         const auto& fm = *firstMeasurement;
+        // Keep the smoothed parameters -- that is the re-linearisation this
+        // re-seeding exists for -- but inflate the covariance that comes with
+        // them. It already contains every measurement on the track, and the
+        // next pass is about to filter those same measurements again; carrying
+        // it over unchanged counts their information twice, compounding once
+        // per pass. See DafFitterOptions::reseedCovarianceScaling.
+        BoundSquareMatrix seedCov = fm.smoothedCovariance();
+        if (dafOptions.reseedCovarianceScaling != 1.) {
+          seedCov *= dafOptions.reseedCovarianceScaling;
+        }
         currentSeed = BoundTrackParameters(
-            fm.referenceSurface().getSharedPtr(), fm.smoothed(),
-            fm.smoothedCovariance(), currentSeed.particleHypothesis());
+            fm.referenceSurface().getSharedPtr(), fm.smoothed(), seedCov,
+            currentSeed.particleHypothesis());
         ACTS_VERBOSE("Re-seeding next pass from the smoothed first-measurement "
                      "state on surface "
                      << fm.referenceSurface().geometryId()
@@ -618,6 +750,10 @@ class DeterministicAnnealingFitter {
       updateCandidateWeights(forwardTrack, measurementGroups, dafOptions,
                              candidateState, annealing, annealingState,
                              scratchCandidateStates);
+
+      // Record before the annealing step below, so the entry carries the
+      // temperature this pass actually ran at rather than the next one's.
+      recordTrace(iter, /*isFinal=*/false);
 
       if (logger().doPrint(Logging::DEBUG)) {
         std::stringstream msg;

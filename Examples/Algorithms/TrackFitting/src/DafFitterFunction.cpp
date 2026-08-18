@@ -107,6 +107,53 @@ bool materialVolumeAccepted(unsigned volume) {
   return false;
 }
 
+/// Steps without forward progress before a pass is abandoned (0 = keep the
+/// DafFitterOptions default). Raising it is what a multi-turn curler needs:
+/// it takes many steps between consecutive wires, which the guard cannot
+/// distinguish from a non-converging target search.
+unsigned stallStepsOverride() {
+  static const unsigned value = [] {
+    const char* env = std::getenv("ACTS_DAF_STALL_STEPS");
+    return env == nullptr ? 0u
+                          : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
+  }();
+  return value;
+}
+
+/// Multiplies the path limit derived from the sequence span. A curler's arc
+/// length grows as its momentum falls, so a limit sized for a straight track
+/// truncates it mid-trajectory and it ends with too few measurements.
+double pathLimitScale() {
+  static const double value = [] {
+    const char* env = std::getenv("ACTS_DAF_PATH_SCALE");
+    return env == nullptr ? 1.0 : std::strtod(env, nullptr);
+  }();
+  return value;
+}
+
+/// Score DAF candidate weights against the unbiased smoothed state.
+bool useUnbiasedSmoothedState() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DAF_UNBIASED");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return value;
+}
+
+/// Rebuild the DirectNavigator sequence from each pass's re-seeded parameters
+/// (ACTS_DAF_REBUILD_SEQ=1) instead of reusing the one built from the original
+/// seed. The re-seeding already re-linearises the PARAMETERS between passes;
+/// this re-linearises the navigation GEOMETRY with them, which is what GenFit's
+/// KalmanFitterRefTrack does via setRefitAll. Costs one sequence preparation
+/// per pass -- a sort plus a material-surface sweep -- so it is not free.
+bool rebuildSequencePerPass() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DAF_REBUILD_SEQ");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return value;
+}
+
 unsigned maxStepsOverride() {
   static const unsigned value = [] {
     const char* env = std::getenv("ACTS_MAX_STEPS");
@@ -140,6 +187,21 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   Acts::AnnealingUtility::Config annealingConfig;
   std::size_t iterationsPerTemperature = 1;
   std::size_t maxIterations = 100;
+
+  /// Drift-circle initial DAF weights on straw surfaces, as a multiple of the
+  /// straw's bounds radius; 0 keeps the uniform 1/N start. ~3 reproduces
+  /// GenFit's rMax = 1.5 x cell spacing for the Belle2 CDC. See
+  /// DafActor::strawInitialWeightRadiusFactor.
+  double strawInitialWeightRadiusFactor = 0.;
+
+  /// Combine mirror hypotheses by moment matching rather than the default
+  /// information-form sum. See Acts::detail::momentMatchedDafWeightedCombiner.
+  bool useMomentMatchedCombiner = false;
+
+  /// Inflation applied to the re-seed covariance between annealing passes;
+  /// 1 keeps the previous behaviour. See
+  /// DafFitterOptions::reseedCovarianceScaling.
+  double reseedCovarianceScaling = 1.;
 
   std::vector<const Acts::Surface*> materialSurfaces;
 
@@ -199,9 +261,15 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     extensions.chiSquareCalculator
         .template connect<&Acts::detail::defaultDafChiSquareCalculator<
             Acts::VectorMultiTrajectory>>();
-    extensions.weightedCombiner
-        .template connect<&Acts::detail::defaultDafWeightedCombiner<
-            Acts::VectorMultiTrajectory>>();
+    if (useMomentMatchedCombiner) {
+      extensions.weightedCombiner
+          .template connect<&Acts::detail::momentMatchedDafWeightedCombiner<
+              Acts::VectorMultiTrajectory>>();
+    } else {
+      extensions.weightedCombiner
+          .template connect<&Acts::detail::defaultDafWeightedCombiner<
+              Acts::VectorMultiTrajectory>>();
+    }
     extensions.updater.template connect<
         &Acts::GainMatrixUpdater::operator()<Acts::VectorMultiTrajectory>>(
         &dafUpdater);
@@ -220,6 +288,13 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
 
     dafOptions.referenceSurfaceStrategy =
         Acts::TrackExtrapolationStrategy::first;
+    dafOptions.strawInitialWeightRadiusFactor =
+        strawInitialWeightRadiusFactor;
+    dafOptions.reseedCovarianceScaling = reseedCovarianceScaling;
+    dafOptions.useUnbiasedSmoothedState = useUnbiasedSmoothedState();
+    if (stallStepsOverride() > 0) {
+      dafOptions.stallStepLimit = stallStepsOverride();
+    }
 
     return dafOptions;
   }
@@ -231,9 +306,11 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
       const TrackParameters& initialParameters,
       const GeneralFitterOptions& options,
       const MeasurementCalibratorAdapter& calibrator, TrackContainer& tracks,
-      Acts::DafCandidateMap* finalCandidateState) const override {
+      Acts::DafCandidateMap* finalCandidateState,
+      Acts::DafCandidateTrace* candidateTrace) const override {
     auto dafOptions = makeDafOptions(options, calibrator);
     dafOptions.finalCandidateState = finalCandidateState;
+    dafOptions.candidateTrace = candidateTrace;
     if (useDirectNavigator) {
       // The DirectNavigator cannot target the reference (perigee) surface,
       // which lies outside its sequence: fit without one, then extrapolate
@@ -242,9 +319,11 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
       dafOptions.referenceSurface = nullptr;
 
       auto runDirectFit =
-          [&](const std::vector<const Acts::Surface*>& sequence)
+          [&](const std::unordered_map<const Acts::Surface*,
+                                       Acts::DafMeasurementGroup>& groups,
+              const std::vector<const Acts::Surface*>& sequence)
           -> TrackFitterResult {
-        auto result = directFitter.fit(measurementGroups, initialParameters,
+        auto result = directFitter.fit(groups, initialParameters,
                                        dafOptions, sequence, tracks);
         if (result.ok() && options.referenceSurface != nullptr) {
           Propagator::Options<> extrapolationOptions(options.geoContext,
@@ -265,19 +344,69 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
         // from the seed, material-surface injection, 1.5 m path limit) so
         // both fitters traverse the identical DirectNavigator sequence.
         std::vector<const Acts::Surface*> sequence = surfaceSequence;
+        std::vector<const Acts::Surface*> dropped;
         const double sequenceSpan = prepareDirectNavigationSequence(
             options.geoContext, initialParameters.position(options.geoContext),
             initialParameters.direction(), sequence, materialSurfaces,
-            seedSignedRadius(initialParameters, options));
+            seedSignedRadius(initialParameters, options), &dropped);
         // Sized from the sequence rather than fixed: a constant 1.5 m
         // truncates curlers, whose arc length grows as the momentum falls.
         dafOptions.propagatorPlainOptions.pathLimit =
+            pathLimitScale() *
             std::max(1.5 * Acts::UnitConstants::m,
                      1.5 * sequenceSpan + 0.5 * Acts::UnitConstants::m);
         if (maxStepsOverride() > 0) {
           dafOptions.propagatorPlainOptions.maxSteps = maxStepsOverride();
         }
-        return runDirectFit(sequence);
+
+        // Per-pass re-linearisation of the navigation geometry: every DAF pass
+        // rebuilds the sequence from its own re-seeded parameters instead of
+        // reusing this one, which is frozen at the original seed. GenFit's
+        // KalmanFitterRefTrack does the equivalent via setRefitAll. Installed
+        // only in this branch so that pass 1 and every later pass go through
+        // the identical preparation -- with the raw sequence below, a rebuild
+        // would suddenly sort it and inject material from pass 2 onwards.
+        //
+        // The reachability cut is deliberately NOT passed a `dropped` vector
+        // here: on a later pass a hit surface that this seed cannot reach is
+        // still a real hit, and dropping it would make DafActor's termination
+        // condition unsatisfiable. The fitter checks for exactly that and falls
+        // back to the previous pass's sequence.
+        //
+        // pathLimit stays as computed above, from the first sequence's span. A
+        // rebuilt sequence spans a shorter arc as the seed improves, so this is
+        // conservative rather than truncating; it is not re-derived because
+        // plainOptions are consumed before the pass loop starts.
+        if (rebuildSequencePerPass()) {
+          dafOptions.rebuildSequence =
+              [this, &options,
+               &surfaceSequence](const Acts::BoundTrackParameters& passSeed) {
+                std::vector<const Acts::Surface*> rebuilt = surfaceSequence;
+                prepareDirectNavigationSequence(
+                    options.geoContext, passSeed.position(options.geoContext),
+                    passSeed.direction(), rebuilt, materialSurfaces,
+                    seedSignedRadius(passSeed, options));
+                return rebuilt;
+              };
+        }
+
+        if (dropped.empty()) {
+          return runDirectFit(measurementGroups, sequence);
+        }
+        // The reachability cut removed hit surfaces from the sequence, so their
+        // groups have to go too: DafActor ends a pass on
+        // measurementStates == inputMeasurementGroups.size(), and a group that
+        // is never visited would leave that unsatisfied for the whole
+        // propagation -- trading the step burn we are trying to avoid for a
+        // path-limit burn.
+        auto reachableGroups = measurementGroups;
+        for (const Acts::Surface* srf : dropped) {
+          reachableGroups.erase(srf);
+        }
+        if (reachableGroups.empty()) {
+          return Acts::DafFitterError::NoMeasurementFound;
+        }
+        return runDirectFit(reachableGroups, sequence);
       }
 
       // Default: feed the DirectNavigator the surfaces in proto-track
@@ -292,7 +421,7 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
       // the fit. (For a purely radial silicon sequence the two orders
       // coincide, so this only bites once non-monotonic subdetectors such as
       // the CDC are involved.)
-      return runDirectFit(surfaceSequence);
+      return runDirectFit(measurementGroups, surfaceSequence);
     }
     return fitter.fit(measurementGroups, initialParameters, dafOptions, tracks);
   }
@@ -309,7 +438,8 @@ ActsExamples::makeDafFitterFunction(
     std::vector<double> annealingTemperatures, double annealingCutOff,
     std::size_t iterationsPerTemperature, std::size_t maxIterations,
     bool useDirectNavigator, bool useKfSequenceHandling,
-    const Acts::Logger& logger) {
+    double strawInitialWeightRadiusFactor, bool useMomentMatchedCombiner,
+    double reseedCovarianceScaling, const Acts::Logger& logger) {
   // Stepper should be copied into the fitters. Keep a handle on the field
   // first: the direct-navigation branch needs it to size the seed curvature.
   auto fieldForCurvature = magneticField;
@@ -354,6 +484,10 @@ ActsExamples::makeDafFitterFunction(
   fitterFunction->annealingConfig.cutOff = annealingCutOff;
   fitterFunction->iterationsPerTemperature = iterationsPerTemperature;
   fitterFunction->maxIterations = maxIterations;
+  fitterFunction->strawInitialWeightRadiusFactor =
+      strawInitialWeightRadiusFactor;
+  fitterFunction->useMomentMatchedCombiner = useMomentMatchedCombiner;
+  fitterFunction->reseedCovarianceScaling = reseedCovarianceScaling;
 
   return fitterFunction;
 }

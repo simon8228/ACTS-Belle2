@@ -132,11 +132,24 @@ ProcessCode DafTrackFittingAlgorithm::execute(
   // per candidate per fitted track). Safe per-event even with a parallel
   // sequencer, since every event writes its own file.
   std::ofstream candidatesCsv;
+  std::ofstream traceCsv;
   if (!m_cfg.outputCandidatesDir.empty()) {
     candidatesCsv.open(perEventFilepath(
         m_cfg.outputCandidatesDir, "daf-candidates.csv", ctx.eventNumber));
     candidatesCsv
         << "proto_track_id,track_id,geometry_id,measurement_id,weight,chi2,won\n";
+    const bool traceThisEvent =
+        m_cfg.outputWeightTrace &&
+        (m_cfg.weightTraceEvents.empty() ||
+         std::find(m_cfg.weightTraceEvents.begin(),
+                   m_cfg.weightTraceEvents.end(),
+                   ctx.eventNumber) != m_cfg.weightTraceEvents.end());
+    if (traceThisEvent) {
+      traceCsv.open(perEventFilepath(
+          m_cfg.outputCandidatesDir, "daf-weight-trace.csv", ctx.eventNumber));
+      traceCsv << "proto_track_id,track_id,iteration,temperature,is_final,"
+                  "geometry_id,measurement_id,weight,chi2,track_loc0\n";
+    }
   }
 
   // Perform the fit for each input track. For every surface a proto track
@@ -261,9 +274,11 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                  << itrack << " with " << measurementGroups.size()
                  << " surface group(s)");
     Acts::DafCandidateMap finalCandidateState;
+    Acts::DafCandidateTrace candidateTrace;
     auto result = (*m_cfg.fit)(
         measurementGroups, orderedSurfaces, initialParams, options, calibrator,
-        tracks, candidatesCsv.is_open() ? &finalCandidateState : nullptr);
+        tracks, candidatesCsv.is_open() ? &finalCandidateState : nullptr,
+        traceCsv.is_open() ? &candidateTrace : nullptr);
 
     if (result.ok()) {
       auto& track = result.value();
@@ -288,6 +303,32 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                           << sourceLink.index() << ',' << candState.weights[i]
                           << ',' << candState.chi2[i] << ','
                           << (i == bestIdx ? 1 : 0) << '\n';
+          }
+        }
+      }
+      if (traceCsv.is_open()) {
+        // Same per-surface layout as above, once per annealing pass. Surfaces
+        // are walked in proto-track order so a reader can group by
+        // (track, measurement) and get the weight history in pass order
+        // without sorting.
+        for (const auto& entry : candidateTrace) {
+          for (const Acts::Surface* surface : orderedSurfaces) {
+            auto stateIt = entry.state.find(surface);
+            if (stateIt == entry.state.end()) {
+              continue;
+            }
+            const auto& candState = stateIt->second;
+            for (std::size_t i = 0; i < candState.candidates.size(); ++i) {
+              const auto& sourceLink =
+                  candState.candidates[i].get<IndexSourceLink>();
+              traceCsv << itrack << ',' << track.index() << ','
+                       << entry.iteration << ',' << entry.temperature << ','
+                       << (entry.isFinal ? 1 : 0) << ','
+                       << surface->geometryId().value() << ','
+                       << sourceLink.index() << ',' << candState.weights[i]
+                       << ',' << candState.chi2[i] << ','
+                       << candState.trackLoc0 << '\n';
+            }
           }
         }
       }

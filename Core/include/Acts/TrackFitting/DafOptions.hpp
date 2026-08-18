@@ -20,6 +20,8 @@
 #include "Acts/Utilities/Delegate.hpp"
 
 #include <cstddef>
+#include <functional>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -104,11 +106,40 @@ struct DafCandidateState {
   std::vector<double> weights;
   /// Most recent chi2 of each candidate, same order as candidates
   std::vector<double> chi2;
+  /// Smoothed local0 of the track itself on this surface, from the pass that
+  /// produced the current weights -- i.e. where the fit thinks it crossed
+  /// this wire, in the same coordinate the candidates are expressed in.
+  /// NaN until a weight update has run. Only meaningful alongside a
+  /// DafCandidateTrace entry, where it makes the evolving track visible next
+  /// to the evolving weights.
+  double trackLoc0 = std::numeric_limits<double>::quiet_NaN();
 };
 
 /// Per-surface map of persistent annealing state, keyed the same way as the
 /// input measurement groups.
 using DafCandidateMap = std::unordered_map<const Surface*, DafCandidateState>;
+
+/// One annealing pass's worth of candidate state, for tracing how the weights
+/// evolve as the temperature falls.
+///
+/// The fitter overwrites its working DafCandidateMap in place on every pass,
+/// so without capturing a copy per pass the annealing history exists only as
+/// debug log text. That history is the whole content of "what the DAF did":
+/// at a high temperature competing candidates share weight almost equally,
+/// and only as the schedule cools does one of them win.
+struct DafCandidateTraceEntry {
+  /// Zero-based index of the forward+smooth pass these weights came out of
+  std::size_t iteration = 0;
+  /// The annealing temperature that pass ran at
+  double temperature = 0.;
+  /// Whether this is the result-producing pass (the final or salvaged one)
+  bool isFinal = false;
+  /// Copy of the per-surface state as it stood after that pass
+  DafCandidateMap state;
+};
+
+/// The full annealing history, one entry per pass, in pass order.
+using DafCandidateTrace = std::vector<DafCandidateTraceEntry>;
 
 /// Combined options for the Deterministic Annealing Filter.
 /// @tparam traj_t The trajectory type
@@ -195,6 +226,81 @@ struct DafFitterOptions {
   /// length.
   std::size_t maxIterations = 100;
 
+  /// Score the candidates against the UNBIASED smoothed state -- the smoothed
+  /// state with this surface's own measurement removed again -- rather than the
+  /// smoothed state itself.
+  ///
+  /// The weights decide which hypothesis a surface prefers, and scoring them
+  /// against a state that already contains the blended measurement of those
+  /// same hypotheses is self-confirming: where the blend sits near the wire,
+  /// both mirrors score alike and the indecision sustains itself. GenFit scores
+  /// against the unbiased state for this reason.
+  ///
+  /// The removal is an information subtraction, exact in principle but
+  /// ill-conditioned when the measurement dominates the prior; the fitter falls
+  /// back to the biased state whenever the result is not positive definite.
+  bool useUnbiasedSmoothedState = false;
+
+  /// Propagation steps allowed without forward progress before a pass is
+  /// abandoned as stalled. The guard exists for oscillating intersection
+  /// searches, but a low-momentum curler legitimately takes many steps between
+  /// consecutive wires, so too small a value turns curlers into fit failures.
+  std::size_t stallStepLimit = 2000;
+
+  /// Factor the re-seed covariance is inflated by between annealing passes;
+  /// 1 (the default) leaves the previous behaviour untouched.
+  ///
+  /// Each pass re-seeds from the previous pass's smoothed first-measurement
+  /// state, which is the right thing for the PARAMETERS -- it re-linearises
+  /// about the current best trajectory. Carrying the smoothed COVARIANCE over
+  /// as well is not: that covariance already contains every measurement on the
+  /// track, and the pass then filters those same measurements again, so their
+  /// information is counted twice, and once more on every further pass. The
+  /// predicted covariances shrink accordingly, chi2 values inflate, and the
+  /// annealing starts reading good hits as outliers.
+  ///
+  /// GenFit avoids this by blowing the covariance up between iterations
+  /// (AbsKalmanFitter's blowUpFactor, default 1e3). Scaling preserves the
+  /// correlation coefficients while removing the false confidence; GenFit
+  /// additionally resets the off-diagonals, which is not done here.
+  double reseedCovarianceScaling = 1.;
+
+  /// Drift-circle initial weighting on straw surfaces, as a multiple of the
+  /// straw's bounds radius; 0 (the default) keeps the uniform 1/N start.
+  /// Mirrors GenFit's CDCRecoHit, which starts a mirror pair at
+  /// w = 0.5 * max(0, 1 - rbar/rMax)^2 so that the first pass distrusts the
+  /// blended-on-the-wire measurement in proportion to the drift radius. See
+  /// DafActor::strawInitialWeightRadiusFactor for the full reasoning.
+  double strawInitialWeightRadiusFactor = 0.;
+
+  /// Optional hook to rebuild the DirectNavigator surface sequence from each
+  /// pass's re-seeded parameters, instead of reusing the one sequence built
+  /// from the original seed for every pass.
+  ///
+  /// The re-seeding above updates the track PARAMETERS between passes, but the
+  /// sequence -- which surfaces, in what order, at what path lengths -- stays
+  /// frozen at the initial seed's geometry, because it is prepared once by the
+  /// caller and handed to fit(). Every pass therefore re-linearises the fit
+  /// against an extrapolation geometry derived from a seed it has already
+  /// improved on. GenFit's KalmanFitterRefTrack rebuilds its reference track on
+  /// every iteration (setRefitAll), so its geometry follows the current
+  /// estimate; this hook is the ACTS equivalent.
+  ///
+  /// Unset (the default) reproduces the previous behaviour exactly, including
+  /// for fits that do not use a DirectNavigator at all.
+  ///
+  /// The returned sequence MUST still contain every measurement-group surface.
+  /// DafActor finishes a pass when
+  /// measurementStates == inputMeasurementGroups.size(), so a hit surface
+  /// missing from the sequence leaves that condition permanently unsatisfied
+  /// and the propagation runs on to the path limit -- turning a re-linearised
+  /// pass into a lost track. The fitter verifies this and keeps the previous
+  /// pass's sequence when the rebuilt one would drop a hit surface, so a
+  /// rebuilder that also applies a reachability cut degrades to the old
+  /// behaviour rather than to a failure.
+  std::function<std::vector<const Surface*>(const BoundTrackParameters&)>
+      rebuildSequence;
+
   /// Optional out-parameter: when non-null, the fitter copies the final
   /// per-surface candidate state (weights/chi2 as consumed by the pass that
   /// produced the returned track, including a salvaged one) into it. The
@@ -202,6 +308,14 @@ struct DafFitterOptions {
   /// Not a constructor parameter -- set it after construction; all existing
   /// construction sites stay valid.
   DafCandidateMap* finalCandidateState = nullptr;
+
+  /// Optional out-parameter: when non-null, the fitter appends one entry per
+  /// annealing pass, recording the weights that pass produced and the
+  /// temperature it ran at. Same "set it after construction" pattern as
+  /// finalCandidateState, and likewise free when left null -- copying the
+  /// candidate map per pass is only worth it when something is going to plot
+  /// it.
+  DafCandidateTrace* candidateTrace = nullptr;
 };
 
 /// @}

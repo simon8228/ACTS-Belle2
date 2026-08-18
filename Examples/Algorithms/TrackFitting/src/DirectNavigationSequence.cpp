@@ -12,6 +12,8 @@
 #include "Acts/Surfaces/BoundaryTolerance.hpp"
 #include "Acts/Surfaces/CylinderBounds.hpp"
 #include "Acts/Surfaces/CylinderSurface.hpp"
+#include "Acts/Surfaces/LineBounds.hpp"
+#include "Acts/Surfaces/LineSurface.hpp"
 #include "Acts/Surfaces/Surface.hpp"
 #include "Acts/Utilities/Intersection.hpp"
 
@@ -33,15 +35,58 @@ namespace {
 /// radius at which the trajectory crosses it rather than by its centre.
 constexpr double kOnAxisTolerance = 1e-3;
 
-/// Diagnostics, all opt-in via the environment so the default build behaves
-/// exactly as configured in code:
-///   ACTS_DNS_HELIX=0  -- ignore the seed curvature, order by straight-line
-///                        ray (the historical behaviour), for A/B testing
-///   ACTS_DNS_DEBUG=N  -- dump the prepared sequence for the first N calls,
-///                        so its monotonicity can be inspected directly
+/// Diagnostics and A/B switches, all opt-in via the environment so the default
+/// build behaves exactly as configured in code:
+///   ACTS_DNS_HELIX=0    -- ignore the seed curvature, order by straight-line
+///                          ray (the historical behaviour), for A/B testing
+///   ACTS_DNS_UNWRAP=0   -- disable turn unwrapping, i.e. keep every path
+///                          folded into the first turn (the behaviour before
+///                          that fix), for A/B testing
+///   ACTS_DNS_HELIXSEL=0 -- select material surfaces with the straight-line
+///                          ray from the seed instead of the trajectory (the
+///                          behaviour before that fix), for A/B testing
+///   ACTS_DNS_DEBUG=N    -- dump the prepared sequence for the first N calls,
+///                          so its monotonicity can be inspected directly
 bool dnsUseHelix() {
   static const bool value = [] {
     const char* env = std::getenv("ACTS_DNS_HELIX");
+    return env == nullptr || std::atoi(env) != 0;
+  }();
+  return value;
+}
+
+bool dnsUnwrapTurns() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DNS_UNWRAP");
+    return env == nullptr || std::atoi(env) != 0;
+  }();
+  return value;
+}
+
+/// Reachability cut: drop sequence surfaces whose radius exceeds this multiple
+/// of the largest radius the seed helix can reach. 0 (the default) disables it.
+///
+/// A track from the perigee cannot exceed r = |centre| + rho. Measured on a
+/// 10k-event CDC fit, 25.7% of sub-200 MeV sequences contained surfaces beyond
+/// that, and the DirectNavigator -- which walks the sequence blindly -- burns
+/// its whole step budget propagating toward one it can never intersect
+/// (PropagatorError:2, 84 of 127 failures, immune to maxSteps=15000). The
+/// distribution of rmax/(2 rho) separates cleanly: p75 = 1.04, then p90 = 1.76,
+/// p99 = 3.04. A factor of ~1.5 therefore leaves seed-consistent tracks alone
+/// and cuts only the pathological tail (14.3% of the low-pT class). The seed's
+/// own rho is the underlying error -- the hits out there are real -- so the
+/// factor must stay generous.
+double dnsMaxReachFactor() {
+  static const double value = [] {
+    const char* env = std::getenv("ACTS_DNS_MAXREACH");
+    return env == nullptr ? 0. : std::strtod(env, nullptr);
+  }();
+  return value;
+}
+
+bool dnsHelixSelection() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DNS_HELIXSEL");
     return env == nullptr || std::atoi(env) != 0;
   }();
   return value;
@@ -63,7 +108,8 @@ double prepareDirectNavigationSequence(
     const Acts::Vector3& seedPosition, const Acts::Vector3& seedDirection,
     std::vector<const Acts::Surface*>& surfaceSequence,
     const std::vector<const Acts::Surface*>& materialSurfaces,
-    double signedHelixRadius) {
+    double signedHelixRadius,
+    std::vector<const Acts::Surface*>* droppedUnreachable) {
   const double sinTheta = seedDirection.head<2>().norm();
   // A vanishing/infinite radius means "no curvature information": fall back to
   // the straight-line ray, which is what this function used to do always.
@@ -92,6 +138,50 @@ double prepareDirectNavigationSequence(
     phiStart = std::atan2(fromCentre.y(), fromCentre.x());
     centreDist = centre.norm();
   }
+
+  // Largest transverse radius the seed helix reaches, and the cut derived from
+  // it. Only meaningful for a curved trajectory; a straight one is unbounded.
+  const double reachFactor = dnsMaxReachFactor();
+  const double maxReachR =
+      (curved && reachFactor > 0.)
+          ? reachFactor * (centreDist + rho)
+          : std::numeric_limits<double>::infinity();
+
+  // Transverse radius of a surface. A cylinder concentric with the beam has its
+  // centre on the axis, so its radius is the bounds value, not the centre.
+  auto surfaceRadius = [&](const Acts::Surface* srf) {
+    const double rc = srf->center(geoContext).head<2>().norm();
+    if (rc > kOnAxisTolerance) {
+      return rc;
+    }
+    if (const auto* cyl = dynamic_cast<const Acts::CylinderSurface*>(srf)) {
+      return cyl->bounds().get(Acts::CylinderBounds::eR);
+    }
+    return rc;
+  };
+
+  auto unreachable = [&](const Acts::Surface* srf) {
+    return std::isfinite(maxReachR) && surfaceRadius(srf) > maxReachR;
+  };
+
+  // Path length of one full turn. Everything `helixPathToPoint` returns is
+  // folded into [0, turnLength): the unwrapping below adds back the turns.
+  const double turnLength = curved ? 2. * std::numbers::pi * rho / sinTheta
+                                   : std::numeric_limits<double>::infinity();
+
+  // Position and direction on the seed helix at arc length `s`. Used to place
+  // the trajectory where the bounds check needs it, so that deciding *whether*
+  // a surface is crossed uses the same geometry as deciding *where* it sits.
+  auto helixStateAt = [&](double s) {
+    const double ang = phiStart + sense * s * sinTheta / rho;
+    const Acts::Vector3 pos(centre.x() + rho * std::cos(ang),
+                            centre.y() + rho * std::sin(ang),
+                            seedPosition.z() + s * seedDirection.z());
+    const Acts::Vector3 dir(-sense * std::sin(ang) * sinTheta,
+                            sense * std::cos(ang) * sinTheta,
+                            seedDirection.z());
+    return std::make_pair(pos, dir);
+  };
 
   // Arc length from the seed to the helix point whose transverse projection
   // lines up with `point`. Wrapped into one turn, so for a curler that crosses
@@ -133,12 +223,60 @@ double prepareDirectNavigationSequence(
     return best;
   };
 
+  // A straw's transverse position is constant along the wire only when the
+  // wire runs parallel to z. A CDC stereo wire does not: its midpoint sits
+  // tens of mm (transversely) from where the track actually crosses it, so
+  // ordering such a surface by its centre places it at the wrong path and the
+  // DirectNavigator -- which walks the sequence blindly -- can step straight
+  // past it. Measured on a steep track: the midpoint is 23-81 mm from the
+  // crossing, and 13% of stereo surfaces never got filtered as a result.
+  //
+  // Solve for the crossing by fixed-point iteration path -> z -> wire point
+  // -> path. It converges in a couple of steps because the wire's transverse
+  // drift over one iteration's change in z is small compared to the cell.
+  auto strawCrossingXY = [&](const Acts::LineSurface* line) -> Acts::Vector2 {
+    const Acts::Vector3 wireCentre = line->center(geoContext);
+    const Acts::Vector3 wireDir = line->lineDirection(geoContext);
+    Acts::Vector2 xy = wireCentre.head<2>();
+    // An axial wire (or one perpendicular to z, which the CDC has none of)
+    // has nothing to resolve: its transverse position is already the answer.
+    if (std::abs(wireDir.z()) < 1e-6 ||
+        wireDir.head<2>().norm() < kOnAxisTolerance) {
+      return xy;
+    }
+    double halfLength = std::numeric_limits<double>::infinity();
+    if (const auto* lb =
+            dynamic_cast<const Acts::LineBounds*>(&line->bounds())) {
+      halfLength = lb->get(Acts::LineBounds::eHalfLengthZ);
+    }
+    const double cosTheta = seedDirection.z();
+    for (int i = 0; i < 3; ++i) {
+      const double path = helixPathToPoint(xy);
+      if (!std::isfinite(path)) {
+        break;
+      }
+      const double z = seedPosition.z() + path * cosTheta;
+      // Clamped to the physical wire: past the endplate the nearest point of
+      // the wire is its end, which is the honest thing to order by.
+      const double t = std::clamp((z - wireCentre.z()) / wireDir.z(),
+                                  -halfLength, halfLength);
+      xy = wireCentre.head<2>() + t * wireDir.head<2>();
+    }
+    return xy;
+  };
+
   auto pathTo = [&](const Acts::Surface* srf) -> double {
     if (curved) {
+      if (const auto* line = dynamic_cast<const Acts::LineSurface*>(srf)) {
+        const Acts::Vector2 xy = strawCrossingXY(line);
+        if (xy.norm() > kOnAxisTolerance) {
+          return helixPathToPoint(xy);
+        }
+      }
       const Acts::Vector3 srfCentre = srf->center(geoContext);
       if (srfCentre.head<2>().norm() > kOnAxisTolerance) {
-        // Off-axis: straws, planes, discs -- the centre is a real transverse
-        // point, so the arc length to it is unambiguous.
+        // Off-axis: planes, discs -- the centre is a real transverse point,
+        // so the arc length to it is unambiguous.
         return helixPathToPoint(srfCentre.head<2>());
       }
       if (const auto* cyl = dynamic_cast<const Acts::CylinderSurface*>(srf)) {
@@ -169,15 +307,54 @@ double prepareDirectNavigationSequence(
   std::vector<std::pair<double, const Acts::Surface*>> ordered;
   ordered.reserve(surfaceSequence.size() + materialSurfaces.size());
 
+  // Turn unwrapping. `helixPathToPoint` folds every path into the first turn,
+  // so a curler that makes more than one revolution has its later hits ordered
+  // as though they came on turn one -- and, worse, the span returned below
+  // (which sizes the propagator's path limit) never exceeds a single turn, so
+  // the propagation is cut short and every surface past that point is dropped
+  // without even being recorded as a hole.
+  //
+  // The incoming order is the proto track's, i.e. the pattern-recognised
+  // traversal order, so the turn count can simply be accumulated along it: a
+  // wrapped path that jumps backwards by more than half a turn is a new
+  // revolution. Half a turn as the threshold is the standard phase-unwrap
+  // rule and tolerates the small non-monotonicity of neighbouring hits.
+  const bool unwrap = curved && dnsUnwrapTurns() && std::isfinite(turnLength);
   const std::size_t hitCount = surfaceSequence.size();
   double maxHitPath = 0.;
+  double turnOffset = 0.;
+  double prevWrapped = 0.;
+  bool havePrev = false;
   for (const Acts::Surface* srf : surfaceSequence) {
-    const double path = pathTo(srf);
+    if (unreachable(srf)) {
+      // Reported back so the caller can drop the matching measurement group;
+      // see the header. Losing the hit is the point: it converts a whole track
+      // lost to a step-budget burn into a track fitted with fewer hits.
+      if (droppedUnreachable != nullptr) {
+        droppedUnreachable->push_back(srf);
+      }
+      continue;
+    }
+    double path = pathTo(srf);
+    if (unwrap && std::isfinite(path)) {
+      if (havePrev && path < prevWrapped - 0.5 * turnLength) {
+        turnOffset += turnLength;
+      }
+      prevWrapped = path;
+      havePrev = true;
+      path += turnOffset;
+    }
     if (std::isfinite(path) && path > 0.) {
       maxHitPath = std::max(maxHitPath, path);
     }
     ordered.emplace_back(path, srf);
   }
+  // How many revolutions the hits span, so material surfaces can be repeated
+  // on each of them below.
+  const std::size_t nTurns =
+      (unwrap && turnLength > 0.)
+          ? static_cast<std::size_t>(std::floor(maxHitPath / turnLength))
+          : 0;
   // Selection and ordering are two different questions and must not share a
   // test. `pathTo` deliberately ignores bounds so it can return a path for
   // every surface, which is what ordering needs; deciding *whether* a material
@@ -195,12 +372,57 @@ double prepareDirectNavigationSequence(
            intersection.pathLength() > 0;
   };
 
+  // ...but shooting that ray from the *seed* asks whether the seed tangent
+  // crosses the surface, not whether the track does, and the two part company
+  // fast: at 1.5 T a 1 GeV track is already 221 mm off its own tangent after a
+  // metre of path, 620 mm at 300 MeV -- against an 18 mm CDC cell. So the ray
+  // both admits material the track never reaches (which the DirectNavigator
+  // then spends its step budget chasing, the same failure the bounds check
+  // above was added to stop) and rejects material it does cross (whose
+  // scattering and energy loss are then simply never applied).
+  //
+  // Test on the trajectory instead: step back a little from the crossing the
+  // ordering computed, and intersect from there. Over that short distance the
+  // helix and its local tangent agree, so this is the same intersection
+  // machinery evaluated where the track actually is.
+  constexpr double kLinearisationStep = 10.;
+  auto crossesOnTrajectory = [&](const Acts::Surface* srf, double path) {
+    if (!curved || !dnsHelixSelection() || !std::isfinite(path)) {
+      return crossesWithinBounds(srf);
+    }
+    const auto [pos, dir] = helixStateAt(std::max(0., path - kLinearisationStep));
+    auto multiIntersection =
+        srf->intersect(geoContext, pos, dir, Acts::BoundaryTolerance::None());
+    const auto& intersection = multiIntersection.closestForward();
+    return intersection.status() >= Acts::IntersectionStatus::reachable &&
+           intersection.pathLength() > 0;
+  };
+
   for (const Acts::Surface* srf : materialSurfaces) {
-    if (!crossesWithinBounds(srf)) {
+    if (unreachable(srf)) {
+      continue;   // material only; nothing to erase from the measurement groups
+    }
+    const double wrapped = pathTo(srf);
+    if (!std::isfinite(wrapped) || wrapped <= 0.) {
       continue;
     }
-    const double path = pathTo(srf);
-    if (std::isfinite(path) && path > 0. && path < maxHitPath + 1.0) {
+    // A curler crosses the same material surface once per revolution, and each
+    // crossing is a real interaction, so the surface is placed on every turn
+    // the hits span. nTurns is 0 unless the track actually wraps, leaving the
+    // single-turn case byte-for-byte as it was.
+    for (std::size_t turn = 0; turn <= nTurns; ++turn) {
+      // Not `wrapped + turn * turnLength`: turnLength is infinite in the
+      // straight-line case, and 0 * infinity is NaN, which would silently
+      // discard every material surface there.
+      const double path =
+          (turn == 0) ? wrapped
+                      : wrapped + static_cast<double>(turn) * turnLength;
+      if (!(path > 0.) || path >= maxHitPath + 1.0) {
+        continue;
+      }
+      if (!crossesOnTrajectory(srf, path)) {
+        continue;
+      }
       ordered.emplace_back(path, srf);
     }
   }

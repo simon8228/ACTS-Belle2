@@ -19,8 +19,10 @@
 #include "ActsExamples/Framework/ProcessCode.hpp"
 #include "ActsExamples/TrackFitting/DafFitterFunction.hpp"
 
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace Acts {
 class TrackingGeometry;
@@ -82,6 +84,21 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
     /// also links fitted tracks back to their proto track index. Empty
     /// disables the export.
     std::string outputCandidatesDir;
+    /// (optional) Alongside `daf-candidates.csv`, also write a per-event
+    /// `daf-weight-trace.csv` holding the weight of every candidate after
+    /// *every* annealing pass, with the temperature that pass ran at -- the
+    /// annealing history rather than just its verdict. Requires
+    /// outputCandidatesDir to be set. Off by default: this is roughly
+    /// (passes x candidates) rows per track, ~16k rows/event for a typical
+    /// CDC schedule, so it is meant for visualising a handful of events, not
+    /// for production runs.
+    bool outputWeightTrace = false;
+    /// (optional) Restrict the weight trace to these event numbers. Empty
+    /// means every event, which is what makes the trace impractical on a
+    /// production run: it is roughly (passes x candidates) rows per track, so
+    /// ~16k rows/event. Naming the handful of events you actually want to
+    /// visualise keeps a 10k-event fit and its per-pass plots in one pass.
+    std::vector<std::size_t> weightTraceEvents;
     /// KF-equivalence mode: trust the proto track's hit choices verbatim
     /// instead of re-gathering competing candidates per surface. Every
     /// surface group holds exactly the proto track's own pick (first pick

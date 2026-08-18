@@ -647,7 +647,12 @@ def addMyDafFitter(
     maxSteps: int = 5000,
     pickTrack: int = -1,
     outputCandidatesDir: str = "",
+    outputWeightTrace: bool = False,
+    weightTraceEvents: Optional[List[int]] = None,
     protoTrackCandidatesOnly: bool = False,
+    strawInitialWeightRadiusFactor: float = 0.0,
+    useMomentMatchedCombiner: bool = False,
+    reseedCovarianceScaling: float = 1.0,
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
     collection names and "tracks" whiteboard alias), but fits with the Deterministic
@@ -664,10 +669,28 @@ def addMyDafFitter(
     `pickTrack` fits only that proto track index per event (-1 = all); combined with
     DEBUG logging it isolates a single track's DAF trace (schedule, per-pass weights).
 
+    `strawInitialWeightRadiusFactor` starts a straw surface's competing drift
+    hypotheses at GenFit's radius-dependent weight, w = 0.5*max(0, 1 - rbar/rMax)^2
+    with rMax = factor * the straw's bounds radius, instead of a uniform 1/N. A
+    50/50 mirror blend otherwise places the effective measurement on the wire with
+    an uninflated covariance, biasing the first pass by more the larger the drift
+    radius. 0 (the default) keeps the uniform start; ~3 reproduces GenFit's
+    rMax = 1.5 x cell spacing for the Belle2 CDC.
+
     `outputCandidatesDir` (empty = off) writes per-event `daf-candidates.csv` files
     there: one row per candidate per fitted track with the DAF's final weight/chi2,
     whether it won its surface, and the fitted-track -> proto-track linkage. Used by
     SVD_tracking/visualize_event_daf.py.
+
+    `outputWeightTrace` (requires `outputCandidatesDir`) additionally writes per-event
+    `daf-weight-trace.csv`: the same rows but for *every* annealing pass, tagged with
+    the pass index and the temperature it ran at. That is the annealing history rather
+    than its verdict -- how a candidate's weight moved from ~0.5 at a hot temperature
+    to ~1 or ~0 once cold -- and it is what SVD_CDC_tracking/visualize_cdc_daf.py
+    --trace animates. Roughly (passes x candidates) rows per track, so keep it to the
+    handful of events being visualised rather than a production run. Pass
+    `weightTraceEvents=[3, 17, 42]` to write it for those event numbers only,
+    which keeps a full production fit and its per-pass plots in a single run.
 
     KF-equivalence knobs (both default off; enable together with a degenerate
     annealing schedule to make a DAF run comparable to addMyFitter's plain KF):
@@ -694,6 +717,8 @@ def addMyDafFitter(
         pickTrack=pickTrack,
         maxSteps=maxSteps,
         outputCandidatesDir=outputCandidatesDir,
+        outputWeightTrace=outputWeightTrace,
+        weightTraceEvents=weightTraceEvents or [],
         protoTrackCandidatesOnly=protoTrackCandidatesOnly,
         fit=acts.examples.makeDafFitterFunction(
             trackingGeometry,
@@ -707,6 +732,9 @@ def addMyDafFitter(
             maxIterations,
             useDirectNavigator=useDirectNavigator,
             useKfSequenceHandling=useKfSequenceHandling,
+            strawInitialWeightRadiusFactor=strawInitialWeightRadiusFactor,
+            useMomentMatchedCombiner=useMomentMatchedCombiner,
+            reseedCovarianceScaling=reseedCovarianceScaling,
             level=customLogLevel(),
         ),
         calibrator=calibrator,

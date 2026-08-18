@@ -44,6 +44,13 @@ namespace ActsExamples {
 /// @param signedHelixRadius Signed transverse radius of the seed helix, sign
 ///        giving the turning sense. Pass 0 (the default) for no curvature
 ///        information, which falls back to straight-line paths.
+/// @param droppedUnreachable When non-null and the reachability cut is enabled
+///        (ACTS_DNS_MAXREACH), receives the surfaces removed from the sequence
+///        because the seed helix cannot reach their radius. The caller MUST
+///        erase these from its measurement groups as well: DafActor finishes a
+///        pass on measurementStates == inputMeasurementGroups.size(), so a
+///        group left in place but absent from the sequence is never satisfied
+///        and the propagation runs on to the path limit.
 /// @return The path length spanned by the prepared sequence, for the caller to
 ///         size the propagator's path limit with. A fixed limit truncates
 ///         curlers, whose arc length grows as the momentum falls.
@@ -52,6 +59,7 @@ double prepareDirectNavigationSequence(
     const Acts::Vector3& seedPosition, const Acts::Vector3& seedDirection,
     std::vector<const Acts::Surface*>& surfaceSequence,
     const std::vector<const Acts::Surface*>& materialSurfaces,
-    double signedHelixRadius = 0.);
+    double signedHelixRadius = 0.,
+    std::vector<const Acts::Surface*>* droppedUnreachable = nullptr);
 
 }  // namespace ActsExamples

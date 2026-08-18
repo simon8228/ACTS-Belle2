@@ -16,6 +16,8 @@
 #include "Acts/Geometry/GeometryContext.hpp"
 #include "Acts/Propagator/StandardAborters.hpp"
 #include "Acts/Propagator/detail/PointwiseMaterialInteraction.hpp"
+#include "Acts/Surfaces/LineBounds.hpp"
+#include "Acts/Surfaces/Surface.hpp"
 #include "Acts/TrackFitting/DafFitterError.hpp"
 #include "Acts/TrackFitting/DafOptions.hpp"
 #include "Acts/Utilities/CalibrationContext.hpp"
@@ -112,6 +114,32 @@ class DafActor {
   /// attached to the result, so the real output trajectory is never bloated
   /// with N-1 discarded candidate rows per multi-candidate surface.
   traj_t* scratchStates{nullptr};
+
+  /// Whether this is the first annealing pass, i.e. the one whose candidate
+  /// weights are the driver's uniform 1/N rather than something derived from a
+  /// previous pass's smoothed trajectory. Only then are the drift-circle
+  /// initial weights below applied.
+  bool firstPass = false;
+
+  /// Enables GenFit's drift-circle initial weighting on straw surfaces, as a
+  /// multiple of the straw's bounds radius (0 = off, keep the uniform 1/N).
+  ///
+  /// A 50/50 blend of two mirror hypotheses puts the effective measurement on
+  /// the wire with an uninflated covariance, so the first pass is pulled toward
+  /// the wire by an amount that grows with the drift radius. GenFit counteracts
+  /// this by starting large-radius hits at a low weight
+  /// (cdc/dataobjects/src/CDCRecoHit.cc):
+  ///
+  ///     rMax   = 1.5 * cell spacing
+  ///     weight = 0.5 * max(0, 1 - rbar/rMax)^2      (per candidate)
+  ///
+  /// so the weights sum to <= 1 and the combiner's R_eff = R / sum(w) is
+  /// inflated exactly where the blend is least trustworthy. Here rMax is taken
+  /// as this factor times the straw's bounds radius; for the Belle2 CDC the
+  /// bounds radius is cell/2 - 0.8 mm, so a factor of 3 gives 12.6 mm (inner)
+  /// and 24.6 mm (outer) against GenFit's 15 and 27 -- close, and the knob is
+  /// there to tune.
+  double strawInitialWeightRadiusFactor = 0.;
 
   /// Maximum number of propagation steps allowed without any forward
   /// progress (a new measurement, hole, or material-only surface being
@@ -326,15 +354,11 @@ class DafActor {
                     : TrackStatePropMask::Calibrated;
         auto candidate =
             scratchStates->makeTrackState(candidateMask, kTrackIndexInvalid);
-        // Surface-aware calibrators read the reference surface of the state
-        // they are handed -- e.g. ActsExamples' DriftChamberCalibrator needs
-        // the straw type to know it must sign the drift radius at all, and the
-        // wire position to re-evaluate the x-t relation. KalmanFitter's actor
-        // sets it on its single track state before calibrating; these scratch
-        // candidates are never attached to the output trajectory, so this is
-        // the only place they can get one. Without it such a calibrator
-        // dereferences a null surface (the assert is compiled out in
-        // -DNDEBUG builds).
+        // A calibrator may need to know which surface it is calibrating on --
+        // a drift-chamber one has to, since the x-t relation depends on the
+        // incidence angle against the wire. The scratch states are not part of
+        // the trajectory, so nothing else sets this for them, and without it
+        // referenceSurface() dereferences an unset pointer.
         candidate.setReferenceSurface(surface.getSharedPtr());
         if (i == 0) {
           candidate.predicted() = trackStateProxy.predicted();
@@ -365,6 +389,38 @@ class DafActor {
       assert(candState.weights.size() == group.size() &&
              "DafActor requires prior weights to be initialized by the "
              "outer driver before propagation");
+
+      // Drift-circle initial weights (see strawInitialWeightRadiusFactor).
+      // Only on the first pass: from the second onward the weights carry real
+      // information from the previous pass's smoothed trajectory, which must
+      // not be overwritten by a geometric prior.
+      if (firstPass && strawInitialWeightRadiusFactor > 0. &&
+          candidates.size() > 1 && surface.type() == Surface::Straw) {
+        const auto* lineBounds =
+            dynamic_cast<const LineBounds*>(&surface.bounds());
+        if (lineBounds != nullptr) {
+          const double rMax =
+              strawInitialWeightRadiusFactor * lineBounds->get(LineBounds::eR);
+          if (rMax > 0.) {
+            // Mean drift radius of the competing hypotheses, i.e. GenFit's
+            // (mL + mR) / 2 -- the calibrated values are the signed local
+            // coordinate, so take magnitudes.
+            double meanRadius = 0.;
+            for (const auto& candidate : candidates) {
+              meanRadius += std::abs(candidate.effectiveCalibrated()[0]);
+            }
+            meanRadius /= static_cast<double>(candidates.size());
+
+            const double reduced = std::max(0., 1. - meanRadius / rMax);
+            const double weight = 0.5 * reduced * reduced;
+            ACTS_VERBOSE("DafActor: drift-circle initial weight on surface "
+                         << surface.geometryId() << ": rbar=" << meanRadius
+                         << " rMax=" << rMax << " -> w=" << weight
+                         << " per candidate");
+            candState.weights.assign(candidates.size(), weight);
+          }
+        }
+      }
 
       extensions.weightedCombiner(constCandidates, candState.weights,
                                   trackStateProxy);

@@ -52,13 +52,17 @@ class DafFitterFunction {
   /// @param finalCandidateState optional out-parameter; when non-null the
   /// fitter fills it with the final per-surface candidate weights/chi2 the
   /// returned track was built from (see DafFitterOptions::finalCandidateState)
+  /// @param candidateTrace optional out-parameter; when non-null the fitter
+  /// appends one entry per annealing pass, giving the whole weight history
+  /// rather than just its endpoint (see DafFitterOptions::candidateTrace)
   virtual TrackFitterResult operator()(
       const std::unordered_map<const Acts::Surface*, Acts::DafMeasurementGroup>&
           measurementGroups,
       const std::vector<const Acts::Surface*>& surfaceSequence,
       const TrackParameters&, const GeneralFitterOptions&,
       const MeasurementCalibratorAdapter&, TrackContainer&,
-      Acts::DafCandidateMap* finalCandidateState = nullptr) const = 0;
+      Acts::DafCandidateMap* finalCandidateState = nullptr,
+      Acts::DafCandidateTrace* candidateTrace = nullptr) const = 0;
 };
 
 /// Makes a fitter function object for the Deterministic Annealing Filter
@@ -90,6 +94,9 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     double annealingCutOff = 9., std::size_t iterationsPerTemperature = 1,
     std::size_t maxIterations = 100, bool useDirectNavigator = true,
     bool useKfSequenceHandling = false,
+    double strawInitialWeightRadiusFactor = 0.,
+    bool useMomentMatchedCombiner = false,
+    double reseedCovarianceScaling = 1.,
     const Acts::Logger& logger = *Acts::getDefaultLogger(
         "Daf", Acts::Logging::INFO));
 

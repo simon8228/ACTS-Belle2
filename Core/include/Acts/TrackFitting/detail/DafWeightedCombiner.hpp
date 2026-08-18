@@ -97,4 +97,87 @@ void defaultDafWeightedCombiner(
   });
 }
 
+/// Moment-matching weighted-measurement combiner for the Deterministic
+/// Annealing Filter, for candidates that are mirror-image reinterpretations of
+/// the same raw measurement -- the drift-circle left/right case the default
+/// combiner above documents itself as unsuitable for.
+///
+/// Collapses the weighted mixture to its first two moments:
+///   m_eff = sum_i wbar_i m_i
+///   R_eff = sum_i wbar_i [ R_i + (m_i - m_eff)(m_i - m_eff)^T ] / sum_i w_i
+/// with wbar the weights normalised to one. The spread term is what the
+/// information-form combination lacks: for a 50/50 pair at +-d it returns the
+/// wire position with covariance sigma^2 + d^2 -- "somewhere within +-d of the
+/// wire" -- where the default returns the wire position with covariance
+/// sigma^2, i.e. it asserts the track passes through the wire to the drift
+/// resolution. Measured consequence of that assertion in a CDC fit: on surfaces
+/// the annealing left undecided, the fitted track sat at 0.20 of the drift
+/// radius (on the wire) instead of on the drift circle, and 46% of them ended
+/// with a non-finite track position, against none elsewhere -- the vanishing
+/// (1 - H*K)*R denominator in GainMatrixUpdater.
+///
+/// The trailing division by sum(w) preserves the default's outlier behaviour:
+/// a hit the annealing has down-weighted keeps its covariance inflated by
+/// 1/sum(w), and for a single candidate this reduces exactly to R/w.
+///
+/// @tparam traj_t The trajectory type
+/// @param candidates The calibrated candidate track states, one per hit
+/// hypothesis, same order as @p weights
+/// @param weights The annealed weight of each candidate, same order as
+/// @p candidates
+/// @param combined The track state to write the effective measurement into
+template <typename traj_t>
+void momentMatchedDafWeightedCombiner(
+    const std::vector<typename traj_t::ConstTrackStateProxy>& candidates,
+    const std::vector<double>& weights,
+    typename traj_t::TrackStateProxy combined) {
+  assert(candidates.size() == weights.size() &&
+         "momentMatchedDafWeightedCombiner requires one weight per candidate");
+  assert(!candidates.empty() &&
+         "momentMatchedDafWeightedCombiner requires at least one candidate");
+
+  const std::size_t measdim = candidates.front().calibratedSize();
+
+  visit_measurement(measdim, [&](auto N) {
+    constexpr std::size_t kMeasurementSize = decltype(N)::value;
+    using ProjectedVector = Vector<kMeasurementSize>;
+    using ProjectedMatrix = SquareMatrix<kMeasurementSize>;
+
+    // Same floor as the default combiner: annealed weights genuinely underflow
+    // to 0 for a far outlier at low temperature, and a zero total would make
+    // the covariance infinite rather than merely large.
+    constexpr double kMinWeight = 1e-6;
+
+    double sumWeights = 0.;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+      sumWeights += std::max(weights[i], kMinWeight);
+    }
+
+    ProjectedVector mean = ProjectedVector::Zero();
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+      const double w = std::max(weights[i], kMinWeight) / sumWeights;
+      mean += w * candidates[i].template calibrated<kMeasurementSize>();
+    }
+
+    ProjectedMatrix spread = ProjectedMatrix::Zero();
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+      const auto& candidate = candidates[i];
+      assert(candidate.calibratedSize() == measdim &&
+             "momentMatchedDafWeightedCombiner requires all candidates to "
+             "share the same measurement subspace");
+      const double w = std::max(weights[i], kMinWeight) / sumWeights;
+      const ProjectedVector delta =
+          candidate.template calibrated<kMeasurementSize>() - mean;
+      spread += w * (candidate.template calibratedCovariance<kMeasurementSize>() +
+                     delta * delta.transpose());
+    }
+    spread /= sumWeights;
+
+    combined.allocateCalibrated(mean, spread);
+    combined.setProjectorSubspaceIndices(
+        candidates.front()
+            .template projectorSubspaceIndices<kMeasurementSize>());
+  });
+}
+
 }  // namespace Acts::detail
