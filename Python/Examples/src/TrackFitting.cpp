@@ -91,7 +91,8 @@ void addTrackFitting(py::module& mex) {
            bool useDirectNavigator, bool useKfSequenceHandling,
            double strawInitialWeightRadiusFactor,
            bool useMomentMatchedCombiner, double reseedCovarianceScaling,
-           Logging::Level level) {
+           bool referenceLinearization,
+           double referenceStartCovarianceScaling, Logging::Level level) {
           return makeDafFitterFunction(
               std::move(trackingGeometry), std::move(magneticField),
               multipleScattering, energyLoss, freeToBoundCorrection,
@@ -99,6 +100,7 @@ void addTrackFitting(py::module& mex) {
               iterationsPerTemperature, maxIterations, useDirectNavigator,
               useKfSequenceHandling, strawInitialWeightRadiusFactor,
               useMomentMatchedCombiner, reseedCovarianceScaling,
+              referenceLinearization, referenceStartCovarianceScaling,
               *getDefaultLogger("Daf", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
@@ -107,7 +109,9 @@ void addTrackFitting(py::module& mex) {
         "useDirectNavigator"_a = true, "useKfSequenceHandling"_a = false,
         "strawInitialWeightRadiusFactor"_a = 0.,
         "useMomentMatchedCombiner"_a = false,
-        "reseedCovarianceScaling"_a = 1., "level"_a);
+        "reseedCovarianceScaling"_a = 1.,
+        "referenceLinearization"_a = false,
+        "referenceStartCovarianceScaling"_a = 1., "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(
         mex, "MeasurementCalibrator");
@@ -116,19 +120,17 @@ void addTrackFitting(py::module& mex) {
             []() -> std::shared_ptr<MeasurementCalibrator> {
               return std::make_shared<PassThroughCalibrator>();
             });
-    // Kalman: one unsigned drift circle per wire, so the side is taken from the
-    // prediction.
     mex.def("makeDriftChamberCalibrator",
         []() -> std::shared_ptr<MeasurementCalibrator> {
-          return std::make_shared<ActsExamples::DriftChamberCalibrator>(
-              ActsExamples::DriftSignPolicy::FromPrediction);
+          return std::make_shared<ActsExamples::DriftChamberCalibrator>();
         });
-    // DAF: both mirror candidates live on the same surface and the annealing
-    // decides between them, so the exported sign must survive calibration.
+    // Kept only so existing call sites (SVD_CDC_tracking/fitting_cdc.py) still
+    // import. The calibrator no longer takes a sign policy, so this is now the
+    // same calibrator as makeDriftChamberCalibrator above: both sign the drift
+    // from the predicted state.
     mex.def("makeDriftChamberDafCalibrator",
         []() -> std::shared_ptr<MeasurementCalibrator> {
-          return std::make_shared<ActsExamples::DriftChamberCalibrator>(
-              ActsExamples::DriftSignPolicy::Preserve);
+          return std::make_shared<ActsExamples::DriftChamberCalibrator>();
         });
             
 

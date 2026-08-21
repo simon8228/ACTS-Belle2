@@ -265,11 +265,68 @@ struct DafFitterOptions {
   /// additionally resets the off-diagonals, which is not done here.
   double reseedCovarianceScaling = 1.;
 
+  /// Linearise about a reference trajectory instead of about the running
+  /// filtered state -- GenFit's KalmanFitterRefTrack rather than its plain
+  /// KalmanFitter, which is what GenFit's own DAF runs.
+  ///
+  /// With this set, each annealing pass is split in two. A reference pass
+  /// propagates without ever feeding the filtered state back into the stepper,
+  /// recording per surface the reference parameters, the transport Jacobian F,
+  /// the process noise N and the delta state c, and calibrating every candidate
+  /// against that reference. A filter pass then applies the stored affine map
+  /// p = F*p + c, C = F*C*F^T + N and updates -- without propagating at all.
+  ///
+  /// The consequence is that every hit in a pass shares one linearisation
+  /// point, and that point is a full-track-length trajectory rather than a
+  /// partially-informed running estimate. It matters most where the measurement
+  /// itself depends on the expansion point, i.e. drift chambers, whose x-t
+  /// relation and left/right hypotheses are evaluated at the incidence angle of
+  /// whatever state the calibrator is handed.
+  ///
+  /// The reference is updated between passes by re-seeding from the previous
+  /// pass's smoothed first-measurement state, i.e. every pass re-linearises --
+  /// GenFit's setRefitAll, which is what its DAF uses. GenFit's selective
+  /// deltaChi2Ref update is therefore deliberately not implemented: the DAF
+  /// never uses it.
+  ///
+  /// One deviation from GenFit remains. GenFit rebuilds its reference
+  /// piecewise, extrapolating each segment from the previous point's SMOOTHED
+  /// state, so the reference hugs the smoothed trajectory over the whole track.
+  /// Here the reference is one propagation from the smoothed first-measurement
+  /// state, so it can drift from the smoothed curve over a long track. Matching
+  /// GenFit exactly would need one short propagation per segment.
+  bool referenceLinearization = false;
+
+  /// Factor applied to the seed covariance the reference filter starts each
+  /// pass from. Leave it at 1 unless you know what you are doing.
+  ///
+  /// This is NOT GenFit's blowUpFactor, and must not be set to 1e3 to imitate
+  /// it. GenFit can inflate its covariance by 1e3 because its state is
+  /// (q/p, u', v', u, v) -- every component unbounded, so scaling a slope
+  /// variance by 1000 is meaningless but harmless. An ACTS bound covariance
+  /// contains var(phi) and var(theta), which are BOUNDED quantities: inflating
+  /// var(theta) from 1e-2 to 10 rad^2 asserts a direction prior spanning
+  /// several revolutions. The first update then throws the direction anywhere,
+  /// normalizePhiTheta folds the result back into range (flipping phi by pi
+  /// whenever theta wraps past 0 or pi), and the next pass's reference
+  /// propagation starts outside the geometry -- "no start volume could be
+  /// resolved", plus failed field lookups. Observed, not hypothetical.
+  ///
+  /// The blow-up is unnecessary here anyway. GenFit needs it because it starts
+  /// from a covariance that is not valid where it is applied;
+  /// detail::dafReferenceFilter instead TRANSPORTS the seed covariance onto the
+  /// first surface (J*C*J^T + N), which is exactly the covariance the
+  /// running-state filter has at that point -- correctly placed, no double
+  /// counting, and no inflation required.
+  double referenceStartCovarianceScaling = 1.;
+
   /// Drift-circle initial weighting on straw surfaces, as a multiple of the
-  /// straw's bounds radius; 0 (the default) keeps the uniform 1/N start.
+  /// straw's radial cell spacing; 0 (the default) keeps the uniform 1/N start.
   /// Mirrors GenFit's CDCRecoHit, which starts a mirror pair at
   /// w = 0.5 * max(0, 1 - rbar/rMax)^2 so that the first pass distrusts the
-  /// blended-on-the-wire measurement in proportion to the drift radius. See
+  /// blended-on-the-wire measurement in proportion to the drift radius.
+  /// GenFit uses rMax = 1.5 * cell spacing, so 3 (this factor multiplies HALF
+  /// the cell spacing, recovered from the straw bounds) matches it exactly. See
   /// DafActor::strawInitialWeightRadiusFactor for the full reasoning.
   double strawInitialWeightRadiusFactor = 0.;
 

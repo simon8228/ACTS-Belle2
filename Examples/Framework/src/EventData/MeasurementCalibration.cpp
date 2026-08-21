@@ -169,16 +169,9 @@ void ActsExamples::DriftChamberCalibrator::calibrate(
                 }
             }
 
-            // ---- left/right: see DriftSignPolicy ----
-            if (m_signPolicy == DriftSignPolicy::FromPrediction) {
-                double predictedLoc0 = trackState.predicted()[Acts::eBoundLoc0];
-                params[0] = (predictedLoc0 < 0.0) ? -absDrift : absDrift;
-            } else {
-                // Preserve: the two mirror candidates must stay distinct, so
-                // only the MAGNITUDE may be corrected here. std::copysign on
-                // the raw value keeps -mL negative and +mR positive.
-                params[0] = std::copysign(absDrift, params[0]);
-            }
+            // ---- left/right: sign the drift by the predicted side ----
+            double predictedLoc0 = trackState.predicted()[Acts::eBoundLoc0];
+            params[0] = (predictedLoc0 < 0.0) ? -absDrift : absDrift;
         }
     }
 

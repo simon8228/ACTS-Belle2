@@ -188,9 +188,9 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   std::size_t iterationsPerTemperature = 1;
   std::size_t maxIterations = 100;
 
-  /// Drift-circle initial DAF weights on straw surfaces, as a multiple of the
-  /// straw's bounds radius; 0 keeps the uniform 1/N start. ~3 reproduces
-  /// GenFit's rMax = 1.5 x cell spacing for the Belle2 CDC. See
+  /// Drift-circle initial DAF weights on straw surfaces, as a multiple of half
+  /// the straw's radial cell spacing; 0 keeps the uniform 1/N start. 3
+  /// reproduces GenFit's rMax = 1.5 x cell spacing for the Belle2 CDC. See
   /// DafActor::strawInitialWeightRadiusFactor.
   double strawInitialWeightRadiusFactor = 0.;
 
@@ -202,6 +202,16 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   /// 1 keeps the previous behaviour. See
   /// DafFitterOptions::reseedCovarianceScaling.
   double reseedCovarianceScaling = 1.;
+
+  /// Linearise about a reference trajectory (GenFit's KalmanFitterRefTrack)
+  /// instead of the running filtered state. See
+  /// DafFitterOptions::referenceLinearization.
+  bool referenceLinearization = false;
+
+  /// Factor on the seed covariance the reference filter starts each pass from.
+  /// Not GenFit's blowUpFactor -- see
+  /// DafFitterOptions::referenceStartCovarianceScaling for why 1e3 breaks here.
+  double referenceStartCovarianceScaling = 1.;
 
   std::vector<const Acts::Surface*> materialSurfaces;
 
@@ -291,6 +301,9 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     dafOptions.strawInitialWeightRadiusFactor =
         strawInitialWeightRadiusFactor;
     dafOptions.reseedCovarianceScaling = reseedCovarianceScaling;
+    dafOptions.referenceLinearization = referenceLinearization;
+    dafOptions.referenceStartCovarianceScaling =
+        referenceStartCovarianceScaling;
     dafOptions.useUnbiasedSmoothedState = useUnbiasedSmoothedState();
     if (stallStepsOverride() > 0) {
       dafOptions.stallStepLimit = stallStepsOverride();
@@ -340,10 +353,14 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
 
       if (useKfSequenceHandling) {
         // KF-equivalence mode: run the sequence through the exact same
-        // preparation as KalmanFitterFunctionImpl (straight-line-path sort
-        // from the seed, material-surface injection, 1.5 m path limit) so
-        // both fitters traverse the identical DirectNavigator sequence.
+        // preparation as KalmanFitterFunctionImpl (helix-path sort from the
+        // seed, material-surface injection, path limit sized from the returned
+        // span) so both fitters traverse the identical DirectNavigator
+        // sequence.
         std::vector<const Acts::Surface*> sequence = surfaceSequence;
+        // Filled by the reachability cut (ACTS_DNS_MAXREACH) with the hit
+        // surfaces the seed helix cannot reach; the branch below erases their
+        // measurement groups, without which DafActor never finishes a pass.
         std::vector<const Acts::Surface*> dropped;
         const double sequenceSpan = prepareDirectNavigationSequence(
             options.geoContext, initialParameters.position(options.geoContext),
@@ -439,7 +456,8 @@ ActsExamples::makeDafFitterFunction(
     std::size_t iterationsPerTemperature, std::size_t maxIterations,
     bool useDirectNavigator, bool useKfSequenceHandling,
     double strawInitialWeightRadiusFactor, bool useMomentMatchedCombiner,
-    double reseedCovarianceScaling, const Acts::Logger& logger) {
+    double reseedCovarianceScaling, bool referenceLinearization,
+    double referenceStartCovarianceScaling, const Acts::Logger& logger) {
   // Stepper should be copied into the fitters. Keep a handle on the field
   // first: the direct-navigation branch needs it to size the seed curvature.
   auto fieldForCurvature = magneticField;
@@ -488,6 +506,9 @@ ActsExamples::makeDafFitterFunction(
       strawInitialWeightRadiusFactor;
   fitterFunction->useMomentMatchedCombiner = useMomentMatchedCombiner;
   fitterFunction->reseedCovarianceScaling = reseedCovarianceScaling;
+  fitterFunction->referenceLinearization = referenceLinearization;
+  fitterFunction->referenceStartCovarianceScaling =
+      referenceStartCovarianceScaling;
 
   return fitterFunction;
 }

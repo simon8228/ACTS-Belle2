@@ -97,6 +97,8 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     double strawInitialWeightRadiusFactor = 0.,
     bool useMomentMatchedCombiner = false,
     double reseedCovarianceScaling = 1.,
+    bool referenceLinearization = false,
+    double referenceStartCovarianceScaling = 1.,
     const Acts::Logger& logger = *Acts::getDefaultLogger(
         "Daf", Acts::Logging::INFO));
 

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "Acts/Definitions/Common.hpp"
+#include "Acts/Definitions/Units.hpp"
 #include "Acts/EventData/MultiTrajectory.hpp"
 #include "Acts/EventData/MultiTrajectoryHelpers.hpp"
 #include "Acts/EventData/SourceLink.hpp"
@@ -20,6 +21,7 @@
 #include "Acts/Surfaces/Surface.hpp"
 #include "Acts/TrackFitting/DafFitterError.hpp"
 #include "Acts/TrackFitting/DafOptions.hpp"
+#include "Acts/TrackFitting/detail/DafReferenceState.hpp"
 #include "Acts/Utilities/CalibrationContext.hpp"
 #include "Acts/Utilities/Logger.hpp"
 #include "Acts/Utilities/Result.hpp"
@@ -78,6 +80,15 @@ struct DafFitterResult {
   /// `processedStates` value as of the last stall check, to detect when it
   /// changes.
   std::size_t processedStatesAtLastProgress = 0;
+
+  /// Previous reference state's parameters and validity flag. Only used while
+  /// DafActor::recordReference is set: a segment's delta state is a difference
+  /// against the previous surface, so the recorder has to remember it. The
+  /// process noise needs no such memory -- the stepping covariance is reset to
+  /// zero at every recorded surface, so it accumulates exactly one segment's
+  /// noise. See DafReferenceState.
+  BoundVector lastReferenceParameters = BoundVector::Zero();
+  bool hasLastReference = false;
 };
 
 namespace detail {
@@ -121,8 +132,25 @@ class DafActor {
   /// initial weights below applied.
   bool firstPass = false;
 
+  /// Record a reference trajectory instead of filtering.
+  ///
+  /// With this set the actor still propagates and still calibrates every
+  /// candidate on every measurement surface, but it performs no weighted
+  /// combination, no Kalman update, and -- crucially -- never pushes a
+  /// filtered state back into the stepper. The propagation therefore stays on
+  /// the trajectory it started from, which is exactly GenFit's
+  /// KalmanFitterRefTrack::prepareTrack: the pass produces the linearisation
+  /// (reference parameters, F, N, c) and the reference-calibrated candidates
+  /// that detail::dafReferenceFilter then filters without propagating.
+  bool recordReference = false;
+
+  /// Where the recorded reference states are appended, in propagation order.
+  /// Must be non-null when recordReference is set.
+  DafReferenceTrajectory* referenceTrajectory{nullptr};
+
   /// Enables GenFit's drift-circle initial weighting on straw surfaces, as a
-  /// multiple of the straw's bounds radius (0 = off, keep the uniform 1/N).
+  /// multiple of the straw's radial CELL SPACING (0 = off, keep the uniform
+  /// 1/N).
   ///
   /// A 50/50 blend of two mirror hypotheses puts the effective measurement on
   /// the wire with an uninflated covariance, so the first pass is pulled toward
@@ -130,16 +158,30 @@ class DafActor {
   /// this by starting large-radius hits at a low weight
   /// (cdc/dataobjects/src/CDCRecoHit.cc):
   ///
-  ///     rMax   = 1.5 * cell spacing
+  ///     rMax   = 1.5 * cell spacing      (15 mm inner superlayer, 27 mm rest)
   ///     weight = 0.5 * max(0, 1 - rbar/rMax)^2      (per candidate)
   ///
   /// so the weights sum to <= 1 and the combiner's R_eff = R / sum(w) is
-  /// inflated exactly where the blend is least trustworthy. Here rMax is taken
-  /// as this factor times the straw's bounds radius; for the Belle2 CDC the
-  /// bounds radius is cell/2 - 0.8 mm, so a factor of 3 gives 12.6 mm (inner)
-  /// and 24.6 mm (outer) against GenFit's 15 and 27 -- close, and the knob is
-  /// there to tune.
+  /// inflated exactly where the blend is least trustworthy.
+  ///
+  /// The cell spacing is recovered from the straw's own bounds rather than
+  /// configured separately: the Belle2 geometry builds every wire's LineBounds
+  /// as cell/2 - kStrawFieldWireClearance (Belle2.cpp), so
+  ///
+  ///     cell spacing = 2 * (boundsR + kStrawFieldWireClearance)
+  ///     rMax         = factor * (boundsR + kStrawFieldWireClearance)
+  ///
+  /// and a factor of 3 reproduces GenFit's 1.5 * cell spacing exactly, for
+  /// both the 10 mm inner superlayer and the 18 mm cells outside it, with no
+  /// per-layer branching. The factor stays a knob so the margin can be tuned.
   double strawInitialWeightRadiusFactor = 0.;
+
+  /// Radial clearance between a drift cell's boundary and the straw surface's
+  /// LineBounds radius, i.e. boundsR = cell/2 - this. Set by the Belle2 CDC
+  /// geometry builder (Examples/Detectors/Belle2/src/Belle2.cpp) to keep
+  /// neighbouring wire surfaces from overlapping; reused here only to undo that
+  /// offset when recovering the cell spacing above.
+  static constexpr double kStrawFieldWireClearance = 0.8 * UnitConstants::mm;
 
   /// Maximum number of propagation steps allowed without any forward
   /// progress (a new measurement, hole, or material-only surface being
@@ -342,7 +384,14 @@ class DafActor {
 
       assert(scratchStates != nullptr &&
              "DafActor requires a scratch trajectory");
-      scratchStates->clear();
+      // While recording a reference trajectory the calibrated candidates have
+      // to survive the whole propagation: the filter phase consumes them
+      // afterwards, indexed by DafReferenceState::candidateIndices. In the
+      // normal filtering mode they are consumed on the spot and the store is
+      // recycled per surface.
+      if (!recordReference) {
+        scratchStates->clear();
+      }
 
       std::vector<typename traj_t::TrackStateProxy> candidates;
       candidates.reserve(group.size());
@@ -399,8 +448,11 @@ class DafActor {
         const auto* lineBounds =
             dynamic_cast<const LineBounds*>(&surface.bounds());
         if (lineBounds != nullptr) {
+          // Undo the geometry's field-wire clearance to recover half the radial
+          // cell spacing, which is what GenFit's rMax is a multiple of.
           const double rMax =
-              strawInitialWeightRadiusFactor * lineBounds->get(LineBounds::eR);
+              strawInitialWeightRadiusFactor *
+              (lineBounds->get(LineBounds::eR) + kStrawFieldWireClearance);
           if (rMax > 0.) {
             // Mean drift radius of the competing hypotheses, i.e. GenFit's
             // (mL + mR) / 2 -- the calibrated values are the signed local
@@ -420,6 +472,42 @@ class DafActor {
             candState.weights.assign(candidates.size(), weight);
           }
         }
+      }
+
+      // Reference-recording mode stops here: no weighted combination, no
+      // Kalman update, and above all no stepper.update() below -- the
+      // propagation has to stay on the reference trajectory instead of
+      // following the filtered estimate. That single omission is what turns
+      // this actor from GenFit's plain KalmanFitter into its
+      // KalmanFitterRefTrack::prepareTrack.
+      if (recordReference) {
+        recordReferenceState(surface, boundParams.parameters(), jacobian,
+                             pathLength, state.stepping.cov, result,
+                             /*hasMeasurement=*/true, surfaceHasMaterial,
+                             /*isHole=*/false, &candidates);
+        // Restart the noise accumulation for the next segment. Safe because the
+        // recording pass never uses the covariance for anything -- no update, no
+        // gain -- and the propagated path does not depend on it.
+        state.stepping.cov.setZero();
+
+        auto refTypeFlags = trackStateProxy.typeFlags();
+        refTypeFlags.setHasParameters();
+        if (surfaceHasMaterial) {
+          refTypeFlags.setHasMaterial();
+        }
+        result.lastTrackIndex = trackStateProxy.index();
+        result.lastMeasurementIndex = result.lastTrackIndex;
+        ++result.measurementStates;
+        ++result.processedStates;
+        result.measurementHoles = result.missedActiveSurfaces.size();
+
+        Acts::detail::performMaterialInteraction(
+            state, stepper, surface,
+            Acts::detail::determineMaterialUpdateMode(
+                state, navigator, MaterialUpdateMode::PostUpdate),
+            NoiseUpdateMode::addNoise, multipleScattering, energyLoss,
+            logger());
+        return Result<void>::success();
       }
 
       extensions.weightedCombiner(constCandidates, candState.weights,
@@ -551,6 +639,17 @@ class DafActor {
       trackStateProxy.jacobian() = jacobian;
       trackStateProxy.pathLength() = pathLength;
 
+      if (recordReference) {
+        recordReferenceState(surface, boundParams.parameters(), jacobian,
+                             pathLength, state.stepping.cov, result,
+                             /*hasMeasurement=*/false, surfaceHasMaterial,
+                             /*isHole=*/surfaceIsSensitive &&
+                                 precedingMeasurementExists,
+                             /*candidates=*/nullptr);
+        // As above: restart the noise accumulation for the next segment.
+        state.stepping.cov.setZero();
+      }
+
       trackStateProxy.shareFrom(trackStateProxy, TrackStatePropMask::Predicted,
                                 TrackStatePropMask::Filtered);
 
@@ -588,6 +687,98 @@ class DafActor {
     }
 
     return Result<void>::success();
+  }
+
+  /// Append one entry to the reference trajectory, deriving the segment's
+  /// process noise and delta state from the previously recorded entry.
+  ///
+  /// @param surface The surface the reference state sits on
+  /// @param parameters Reference parameters on that surface
+  /// @param jacobian Transport Jacobian accumulated since the previous entry
+  /// @param pathLength Accumulated path length at this surface
+  /// @param covAtSurface Stepping covariance at this surface, which IS this
+  ///        segment's process noise: it is reset to zero at every recorded
+  ///        surface, so it accumulates over exactly one segment.
+  /// @param result The actor result carrying the previous entry
+  /// @param hasMeasurement Whether the surface carries a measurement group
+  /// @param hasMaterial Whether the surface has material
+  /// @param isHole Whether the surface is a hole
+  /// @param candidates The surface's calibrated candidates, or nullptr
+  void recordReferenceState(
+      const Surface& surface, const BoundVector& parameters,
+      const BoundMatrix& jacobian, double pathLength,
+      const BoundSquareMatrix& covAtSurface, result_type& result,
+      bool hasMeasurement, bool hasMaterial, bool isHole,
+      const std::vector<typename traj_t::TrackStateProxy>* candidates) const {
+    assert(referenceTrajectory != nullptr &&
+           "DafActor::recordReference requires a reference trajectory");
+
+    DafReferenceState record;
+    record.surface = &surface;
+    record.parameters = parameters;
+    record.pathLength = pathLength;
+    record.hasMeasurement = hasMeasurement;
+    record.hasMaterial = hasMaterial;
+    record.isHole = isHole;
+
+    if (result.hasLastReference) {
+      record.jacobian = jacobian;
+
+      // Exactly GenFit's definition, see RKTrackRep::getForwardJacobianAndNoise:
+      // the constant that makes the affine model reproduce the reference
+      // transport, lastEndState - jacobian * lastStartState.
+      record.deltaState = parameters - jacobian * result.lastReferenceParameters;
+    } else {
+      // First entry: jacobian is the transport from the propagation start, which
+      // detail::dafReferenceFilter uses to bring the seed covariance onto this
+      // surface rather than pretending a covariance defined at the seed surface
+      // is valid here.
+      record.jacobian = jacobian;
+    }
+
+    // The stepping covariance was zeroed at the previous recorded surface (see
+    // the call sites), so what it holds now is precisely this segment's process
+    // noise -- no subtraction involved.
+    //
+    // It used to be recovered as N_k = C_k - F*C_k-1*F^T, on the theory that a
+    // zero-covariance start makes C pure noise and the difference therefore
+    // well-conditioned. That was wrong: C still ACCUMULATES, so by the outer
+    // layers the running total dwarfs the per-segment increment, the difference
+    // is a small residue of two large matrices, and on roughly half the
+    // segments it came out negative and was clamped to zero -- leaving those
+    // segments with no material noise at all.
+    record.noise = covAtSurface;
+
+    if (candidates != nullptr) {
+      record.candidateIndices.reserve(candidates->size());
+      for (const auto& candidate : *candidates) {
+        record.candidateIndices.push_back(candidate.index());
+      }
+    }
+
+    // The process noise is the one quantity in this scheme with no ACTS
+    // equivalent to check against -- it is reconstructed by differencing rather
+    // than read off, so dump it when asked. sqrt(N(theta,theta)) should sit at
+    // the multiple-scattering angle of one layer, 13.6 MeV/(beta c p) *
+    // sqrt(x/X0): order 1e-4 rad for a 1 GeV track through a CDC layer. A zero
+    // or denormal value means the recovery is broken and the filter is running
+    // without material noise, which reads exactly as degraded resolution.
+    if (logger().doPrint(Logging::DEBUG)) {
+      const BoundVector sigma = record.noise.diagonal().cwiseSqrt();
+      ACTS_DEBUG("DafActor: reference state on surface "
+                 << surface.geometryId() << " s=" << pathLength
+                 << " meas=" << hasMeasurement << " mat=" << hasMaterial
+                 << " sqrt(diag N): loc0=" << sigma[eBoundLoc0]
+                 << " loc1=" << sigma[eBoundLoc1]
+                 << " phi=" << sigma[eBoundPhi]
+                 << " theta=" << sigma[eBoundTheta]
+                 << " qop=" << sigma[eBoundQOverP]);
+    }
+
+    referenceTrajectory->push_back(std::move(record));
+
+    result.lastReferenceParameters = parameters;
+    result.hasLastReference = true;
   }
 };
 

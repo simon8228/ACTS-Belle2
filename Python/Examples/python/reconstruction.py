@@ -653,6 +653,8 @@ def addMyDafFitter(
     strawInitialWeightRadiusFactor: float = 0.0,
     useMomentMatchedCombiner: bool = False,
     reseedCovarianceScaling: float = 1.0,
+    referenceLinearization: bool = False,
+    referenceStartCovarianceScaling: float = 1.0,
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
     collection names and "tracks" whiteboard alias), but fits with the Deterministic
@@ -671,11 +673,12 @@ def addMyDafFitter(
 
     `strawInitialWeightRadiusFactor` starts a straw surface's competing drift
     hypotheses at GenFit's radius-dependent weight, w = 0.5*max(0, 1 - rbar/rMax)^2
-    with rMax = factor * the straw's bounds radius, instead of a uniform 1/N. A
-    50/50 mirror blend otherwise places the effective measurement on the wire with
-    an uninflated covariance, biasing the first pass by more the larger the drift
-    radius. 0 (the default) keeps the uniform start; ~3 reproduces GenFit's
-    rMax = 1.5 x cell spacing for the Belle2 CDC.
+    with rMax = factor * half the straw's radial cell spacing, instead of a uniform
+    1/N. A 50/50 mirror blend otherwise places the effective measurement on the wire
+    with an uninflated covariance, biasing the first pass by more the larger the
+    drift radius. 0 (the default) keeps the uniform start; 3 reproduces GenFit's
+    rMax = 1.5 x cell spacing for the Belle2 CDC exactly (15 mm in the inner
+    superlayer, 27 mm outside it).
 
     `outputCandidatesDir` (empty = off) writes per-event `daf-candidates.csv` files
     there: one row per candidate per fitted track with the DAF's final weight/chi2,
@@ -735,6 +738,8 @@ def addMyDafFitter(
             strawInitialWeightRadiusFactor=strawInitialWeightRadiusFactor,
             useMomentMatchedCombiner=useMomentMatchedCombiner,
             reseedCovarianceScaling=reseedCovarianceScaling,
+            referenceLinearization=referenceLinearization,
+            referenceStartCovarianceScaling=referenceStartCovarianceScaling,
             level=customLogLevel(),
         ),
         calibrator=calibrator,

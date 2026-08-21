@@ -24,6 +24,8 @@
 #include "Acts/TrackFitting/DafFitterError.hpp"
 #include "Acts/TrackFitting/DafOptions.hpp"
 #include "Acts/TrackFitting/detail/DafActor.hpp"
+#include "Acts/TrackFitting/detail/DafReferenceFilter.hpp"
+#include "Acts/TrackFitting/detail/DafReferenceState.hpp"
 #include "Acts/Utilities/AnnealingUtility.hpp"
 #include "Acts/Utilities/CalibrationContext.hpp"
 #include "Acts/Utilities/HashedString.hpp"
@@ -37,6 +39,7 @@
 #include <optional>
 #include <sstream>
 #include <system_error>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -156,7 +159,8 @@ class DeterministicAnnealingFitter {
       const DafFitterOptions<traj_t>& dafOptions,
       const std::vector<const Surface*>* sSequence,
       DafCandidateMap& candidateState, traj_t& scratchStates,
-      bool firstPass = false) const {
+      bool firstPass = false, bool recordReference = false,
+      DafReferenceTrajectory* referenceTrajectory = nullptr) const {
     using DafActorT = Actor;
     using Actors = ActorList<DafActorT>;
     using PropagatorOptions = typename propagator_t::template Options<Actors>;
@@ -191,6 +195,8 @@ class DeterministicAnnealingFitter {
     dafActor.stallStepLimit = dafOptions.stallStepLimit;
     dafActor.strawInitialWeightRadiusFactor =
         dafOptions.strawInitialWeightRadiusFactor;
+    dafActor.recordReference = recordReference;
+    dafActor.referenceTrajectory = referenceTrajectory;
 
     return propagatorOptions;
   }
@@ -238,6 +244,46 @@ class DeterministicAnnealingFitter {
     calculateTrackQuantities(track);
 
     return track;
+  }
+
+  /// Runs a reference pass: propagate without filtering, recording the
+  /// linearisation (reference parameters, F, N, c) and the reference-calibrated
+  /// candidates that detail::dafReferenceFilter then consumes.
+  ///
+  /// @param sParameters Parameters the reference is propagated from. Must carry
+  ///        a ZERO covariance -- see DafActor::recordReferenceState.
+  /// @param propagatorOptions Options with DafActor::recordReference set
+  /// @param recordingStates Throwaway trajectory for the actor's own track
+  ///        states; the reference records are what matter and go elsewhere
+  template <typename propagator_options_t>
+  Result<void> record_impl(const BoundTrackParameters& sParameters,
+                           const propagator_options_t& propagatorOptions,
+                           traj_t& recordingStates) const {
+    auto propagatorState = m_propagator.makeState(propagatorOptions);
+
+    auto propagatorInitResult =
+        m_propagator.initialize(propagatorState, sParameters);
+    if (!propagatorInitResult.ok()) {
+      ACTS_DEBUG("Reference propagation initialization failed: "
+                 << propagatorInitResult.error());
+      return propagatorInitResult.error();
+    }
+
+    auto& dafResult = propagatorState.template get<DafFitterResult<traj_t>>();
+    dafResult.fittedStates = &recordingStates;
+
+    auto result = m_propagator.propagate(propagatorState);
+    if (!result.ok()) {
+      ACTS_DEBUG("Reference propagation failed: " << result.error());
+      return result.error();
+    }
+
+    if (!dafResult.measurementStates) {
+      ACTS_DEBUG("Reference pass found no measurement states");
+      return DafFitterError::NoMeasurementFound;
+    }
+
+    return Result<void>::success();
   }
 
   /// Recomputes each candidate group's annealed weights from the just-
@@ -560,6 +606,104 @@ class DeterministicAnnealingFitter {
                    << passSequence.size() << " surfaces");
     };
 
+    // Buffers for the reference-linearisation path, reused across passes.
+    DafReferenceTrajectory referenceTrajectory;
+    traj_t referenceRecordingStates;
+
+    // The covariance every reference-linearised pass starts from. Deliberately
+    // the ORIGINAL seed covariance and never the previous pass's smoothed one:
+    // the reference carries everything learned so far, so the filter is free to
+    // claim no information at all, and re-filtering the same measurements
+    // against a covariance that already contains them would count them twice
+    // (the reason reseedCovarianceScaling exists on the running-state path).
+    BoundSquareMatrix referenceStartCovariance = BoundSquareMatrix::Identity();
+    if (sParameters.covariance().has_value()) {
+      referenceStartCovariance = sParameters.covariance().value();
+    } else if (dafOptions.referenceLinearization) {
+      ACTS_DEBUG("Seed carries no covariance; the reference filter starts from "
+                 "the identity");
+    }
+    referenceStartCovariance *= dafOptions.referenceStartCovarianceScaling;
+
+    // Which surface referenceStartCovariance is valid on, and whether it has
+    // been replaced by the transported version cached after the first pass.
+    //
+    // Pass 1 propagates the reference from the seed surface, so the filter
+    // transports the seed covariance out to the first recorded surface itself.
+    // Every later pass starts the propagation AT the first measurement surface
+    // -- that is where the re-seeded parameters live -- so its first recorded
+    // state has J = I and N = 0 and no transport happens. Handing it the raw
+    // seed covariance would apply a perigee covariance at a straw, where a
+    // clipped var_d0 of 0.04 mm^2 is tighter than the measurement itself
+    // (0.17 mm^2) and pins the track to the seed's d0.
+    //
+    // The right prior there is the one pass 1 already computed: the predicted
+    // covariance at its first measurement state, which is the seed information
+    // transported to that surface plus accumulated noise, with no measurement
+    // absorbed yet. Cache it and reuse it.
+    const Surface* referenceStartSurface = nullptr;
+    BoundSquareMatrix cachedStartCovariance = BoundSquareMatrix::Identity();
+    bool referenceStartCovarianceCached = false;
+
+    // One forward pass into @p container: either the default running-state
+    // filter (propagate and update as it goes, GenFit's plain KalmanFitter) or
+    // the reference-linearised split (record, then filter without propagating,
+    // GenFit's KalmanFitterRefTrack). Everything downstream -- smoothing, the
+    // weight update, salvaging -- is identical either way.
+    auto runForwardPass =
+        [&](const BoundTrackParameters& seed, bool firstPass, auto& container)
+        -> Result<typename std::decay_t<decltype(container)>::TrackProxy> {
+      rebuildSequenceFor(seed, !firstPass);
+      scratchCandidateStates.clear();
+
+      if (!dafOptions.referenceLinearization) {
+        auto propagatorOptions = make_propagator_options(
+            measurementGroups, dafOptions, passSequencePtr, candidateState,
+            scratchCandidateStates, firstPass);
+        return filter_impl(seed, propagatorOptions, container);
+      }
+
+      referenceTrajectory.clear();
+      referenceRecordingStates.clear();
+
+      // The reference propagation carries a ZERO covariance, so the stepping
+      // covariance at each surface is the accumulated process noise alone --
+      // that is what makes DafActor's N = C_k - F*C_k-1*F^T well-conditioned.
+      // The filter's covariance comes from referenceStartCovariance instead.
+      const BoundSquareMatrix zeroCovariance = BoundSquareMatrix::Zero();
+      BoundTrackParameters referenceSeed(
+          seed.referenceSurface().getSharedPtr(), seed.parameters(),
+          zeroCovariance, seed.particleHypothesis());
+
+      auto propagatorOptions = make_propagator_options(
+          measurementGroups, dafOptions, passSequencePtr, candidateState,
+          scratchCandidateStates, firstPass, /*recordReference=*/true,
+          &referenceTrajectory);
+
+      auto recordResult = record_impl(referenceSeed, propagatorOptions,
+                                      referenceRecordingStates);
+      if (!recordResult.ok()) {
+        return recordResult.error();
+      }
+
+      // Only when this pass's first recorded state really is that surface;
+      // a rebuilt sequence could have moved it, and then the transported prior
+      // does not belong here.
+      const bool useCached =
+          referenceStartCovarianceCached && !referenceTrajectory.empty() &&
+          referenceTrajectory.front().surface == referenceStartSurface;
+      if (referenceStartCovarianceCached && !useCached) {
+        ACTS_DEBUG("Reference pass starts on a different surface than the "
+                   "cached prior was computed for; falling back to the seed "
+                   "covariance");
+      }
+
+      return detail::dafReferenceFilter(
+          referenceTrajectory, scratchCandidateStates,
+          useCached ? cachedStartCovariance : referenceStartCovariance,
+          candidateState, dafOptions, container, logger());
+    };
+
     // One-line convergence story: chi2 of every pass, with '|' marking the
     // annealing temperature steps, plus the weights the fit ended on.
     auto logFitSummary = [&](const char* outcome, double finalChi2) {
@@ -587,13 +731,7 @@ class DeterministicAnnealingFitter {
                             bool firstPass) -> Result<TrackProxy> {
       // Not on the first pass: there the seed IS the caller's, so the rebuild
       // would reproduce the sequence it was already handed.
-      rebuildSequenceFor(seed, !firstPass);
-      scratchCandidateStates.clear();
-      auto propagatorOptions = make_propagator_options(
-          measurementGroups, dafOptions, passSequencePtr, candidateState,
-          scratchCandidateStates, firstPass);
-
-      auto forwardResult = filter_impl(seed, propagatorOptions, trackContainer);
+      auto forwardResult = runForwardPass(seed, firstPass, trackContainer);
       if (!forwardResult.ok()) {
         return forwardResult.error();
       }
@@ -687,15 +825,9 @@ class DeterministicAnnealingFitter {
         return salvage(finalTrack.error());
       }
 
-      rebuildSequenceFor(currentSeed, iter > 0);
-      scratchCandidateStates.clear();
-      auto propagatorOptions = make_propagator_options(
-          measurementGroups, dafOptions, passSequencePtr, candidateState,
-          scratchCandidateStates, iter == 0);
-
       scratchTrackContainer.clear();
-      auto forwardResult = filter_impl(currentSeed, propagatorOptions,
-                                       scratchTrackContainer);
+      auto forwardResult =
+          runForwardPass(currentSeed, iter == 0, scratchTrackContainer);
       if (!forwardResult.ok()) {
         ACTS_DEBUG("DAF pass " << iter << " failed: " << forwardResult.error());
         return salvage(forwardResult.error());
@@ -709,6 +841,26 @@ class DeterministicAnnealingFitter {
         ACTS_DEBUG("Smoothing step failed on pass " << iter << ": "
                                                     << smoothRes.error());
         return salvage(smoothRes.error());
+      }
+
+      // Cache the prior this pass had at its innermost measurement, for every
+      // later pass to start from (see referenceStartSurface). Taken after
+      // smoothing only for convenience -- the smoother writes the smoothed
+      // components and leaves the predicted ones alone. trackStatesReversed
+      // runs tip-first, so the last measurement state seen is the innermost.
+      if (dafOptions.referenceLinearization && !referenceStartCovarianceCached) {
+        for (const auto ts : forwardTrack.trackStatesReversed()) {
+          if (ts.hasCalibrated()) {
+            cachedStartCovariance = ts.predictedCovariance();
+            referenceStartSurface = &ts.referenceSurface();
+          }
+        }
+        if (referenceStartSurface != nullptr) {
+          referenceStartCovarianceCached = true;
+          ACTS_DEBUG("Cached the reference filter's prior at surface "
+                     << referenceStartSurface->geometryId()
+                     << " for the remaining passes");
+        }
       }
 
       // This pass succeeded: remember its (seed, weights) as the fallback for
