@@ -915,6 +915,13 @@ class DeterministicAnnealingFitter {
             referenceStartSurface = &ts.referenceSurface();
           }
         }
+        // Scaled the same as referenceStartCovariance, or the option would
+        // only ever reach pass 1: passes 2..N take this cached prior instead,
+        // and they are where the fit is actually decided. The running-state
+        // path inflates its re-seed covariance on EVERY pass
+        // (reseedCovarianceScaling), so leaving this one unscaled is also what
+        // made the two paths incomparable.
+        cachedStartCovariance *= dafOptions.referenceStartCovarianceScaling;
         if (referenceStartSurface != nullptr) {
           referenceStartCovarianceCached = true;
           ACTS_DEBUG("Cached the reference filter's prior at surface "

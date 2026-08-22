@@ -345,6 +345,19 @@ struct DafFitterOptions {
   /// first surface (J*C*J^T + N), which is exactly the covariance the
   /// running-state filter has at that point -- correctly placed, no double
   /// counting, and no inflation required.
+  ///
+  /// It is, however, what makes a comparison against the running-state path
+  /// fair. That path inflates its re-seed covariance by reseedCovarianceScaling
+  /// on every pass; this path never sees that option, because it seeds its
+  /// reference propagation with a zero covariance and takes its prior from
+  /// here. Running one at 10 and the other at 1 is not an A/B of reference
+  /// linearisation, it is an A/B of the prior -- and a too-tight prior shows up
+  /// exactly where there are too few hits to overwhelm it, i.e. on short
+  /// tracks, which is where the 2026-08-22 comparison lost the most.
+  ///
+  /// Applies to both the seed covariance of the first pass and the transported
+  /// prior cached for passes 2..N. Scaling only the former would leave the
+  /// option with no effect on the passes that decide the fit.
   double referenceStartCovarianceScaling = 1.;
 
   /// Drift-circle initial weighting on straw surfaces, as a multiple of the
