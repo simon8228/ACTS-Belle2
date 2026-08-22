@@ -208,6 +208,12 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   /// DafFitterOptions::referenceLinearization.
   bool referenceLinearization = false;
 
+  /// Score the weights on the reference-calibrated measurements rather than
+  /// re-calibrating them against the smoothed state, as GenFit's DAF does. Only
+  /// meaningful alongside referenceLinearization. See
+  /// DafFitterOptions::referenceWeightCalibration.
+  bool referenceWeightCalibration = true;
+
   /// Factor on the seed covariance the reference filter starts each pass from.
   /// Not GenFit's blowUpFactor -- see
   /// DafFitterOptions::referenceStartCovarianceScaling for why 1e3 breaks here.
@@ -302,6 +308,7 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
         strawInitialWeightRadiusFactor;
     dafOptions.reseedCovarianceScaling = reseedCovarianceScaling;
     dafOptions.referenceLinearization = referenceLinearization;
+    dafOptions.referenceWeightCalibration = referenceWeightCalibration;
     dafOptions.referenceStartCovarianceScaling =
         referenceStartCovarianceScaling;
     dafOptions.useUnbiasedSmoothedState = useUnbiasedSmoothedState();
@@ -457,7 +464,8 @@ ActsExamples::makeDafFitterFunction(
     bool useDirectNavigator, bool useKfSequenceHandling,
     double strawInitialWeightRadiusFactor, bool useMomentMatchedCombiner,
     double reseedCovarianceScaling, bool referenceLinearization,
-    double referenceStartCovarianceScaling, const Acts::Logger& logger) {
+    bool referenceWeightCalibration, double referenceStartCovarianceScaling,
+    const Acts::Logger& logger) {
   // Stepper should be copied into the fitters. Keep a handle on the field
   // first: the direct-navigation branch needs it to size the seed curvature.
   auto fieldForCurvature = magneticField;
@@ -507,6 +515,7 @@ ActsExamples::makeDafFitterFunction(
   fitterFunction->useMomentMatchedCombiner = useMomentMatchedCombiner;
   fitterFunction->reseedCovarianceScaling = reseedCovarianceScaling;
   fitterFunction->referenceLinearization = referenceLinearization;
+  fitterFunction->referenceWeightCalibration = referenceWeightCalibration;
   fitterFunction->referenceStartCovarianceScaling =
       referenceStartCovarianceScaling;
 

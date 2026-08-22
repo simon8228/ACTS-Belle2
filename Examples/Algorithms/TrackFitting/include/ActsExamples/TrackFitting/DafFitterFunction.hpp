@@ -98,6 +98,7 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     bool useMomentMatchedCombiner = false,
     double reseedCovarianceScaling = 1.,
     bool referenceLinearization = false,
+    bool referenceWeightCalibration = true,
     double referenceStartCovarianceScaling = 1.,
     const Acts::Logger& logger = *Acts::getDefaultLogger(
         "Daf", Acts::Logging::INFO));

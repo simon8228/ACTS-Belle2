@@ -297,6 +297,33 @@ struct DafFitterOptions {
   /// GenFit exactly would need one short propagation per segment.
   bool referenceLinearization = false;
 
+  /// Score the candidates for the weight update using the measurements the
+  /// REFERENCE pass calibrated, rather than re-calibrating them against the
+  /// smoothed state. No effect unless referenceLinearization is set.
+  ///
+  /// This is what makes reference linearisation cover the whole pass rather
+  /// than only its filter. GenFit calibrates each surface's measurements once,
+  /// in KalmanFitterRefTrack::prepareTrack, against that surface's reference
+  /// state (@c constructMeasurementsOnPlane(*referenceState)), and DAF's
+  /// processWeights then scores those same measurement objects against the
+  /// smoothed state. One linearisation point per pass, used by filter and
+  /// weights alike.
+  ///
+  /// ACTS's DAF instead re-calibrates every candidate against the smoothed
+  /// state before scoring it. For a silicon hit that is a no-op -- the
+  /// calibration does not depend on the expansion point -- but a drift-chamber
+  /// hit's x-t relation is evaluated at the incidence angle of whatever state
+  /// the calibrator is handed, so the drift length entering the weight chi2 is
+  /// then a different number from the one the filter fitted. That inconsistency
+  /// is exactly what reference linearisation exists to remove, which is why
+  /// this defaults to on: with it, the recorded candidates are reused and only
+  /// their expansion point is swapped for the smoothed state, matching GenFit.
+  ///
+  /// Turn it off to isolate the filter half of the change; the fit then
+  /// linearises its filter about the reference but keeps scoring weights
+  /// against smoothed-state calibrations.
+  bool referenceWeightCalibration = true;
+
   /// Factor applied to the seed covariance the reference filter starts each
   /// pass from. Leave it at 1 unless you know what you are doing.
   ///

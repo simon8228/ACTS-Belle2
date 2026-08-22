@@ -91,7 +91,7 @@ void addTrackFitting(py::module& mex) {
            bool useDirectNavigator, bool useKfSequenceHandling,
            double strawInitialWeightRadiusFactor,
            bool useMomentMatchedCombiner, double reseedCovarianceScaling,
-           bool referenceLinearization,
+           bool referenceLinearization, bool referenceWeightCalibration,
            double referenceStartCovarianceScaling, Logging::Level level) {
           return makeDafFitterFunction(
               std::move(trackingGeometry), std::move(magneticField),
@@ -100,7 +100,8 @@ void addTrackFitting(py::module& mex) {
               iterationsPerTemperature, maxIterations, useDirectNavigator,
               useKfSequenceHandling, strawInitialWeightRadiusFactor,
               useMomentMatchedCombiner, reseedCovarianceScaling,
-              referenceLinearization, referenceStartCovarianceScaling,
+              referenceLinearization, referenceWeightCalibration,
+              referenceStartCovarianceScaling,
               *getDefaultLogger("Daf", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
@@ -111,6 +112,7 @@ void addTrackFitting(py::module& mex) {
         "useMomentMatchedCombiner"_a = false,
         "reseedCovarianceScaling"_a = 1.,
         "referenceLinearization"_a = false,
+        "referenceWeightCalibration"_a = true,
         "referenceStartCovarianceScaling"_a = 1., "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(

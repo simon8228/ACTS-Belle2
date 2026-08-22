@@ -297,6 +297,16 @@ class DeterministicAnnealingFitter {
   /// where the forward-only predicted state is still dominated by the
   /// (typically loose) seed covariance. The seed itself is never changed
   /// between iterations -- only these weights evolve.
+  ///
+  /// @p reference is the trajectory the just-finished pass linearised about, or
+  /// null when the pass ran the running-state filter. When it is supplied and
+  /// DafFitterOptions::referenceWeightCalibration is set, the candidates are not
+  /// re-calibrated here at all: the ones the reference pass already calibrated
+  /// are reused, with only their expansion point swapped for the smoothed state
+  /// before scoring. That is GenFit's arrangement -- one calibration per pass,
+  /// shared by the filter and the weights -- and it keeps the drift length the
+  /// weight chi2 is computed from equal to the one the filter actually fitted.
+  /// See DafFitterOptions::referenceWeightCalibration.
   template <typename track_proxy_t>
   void updateCandidateWeights(
       track_proxy_t track,
@@ -304,8 +314,26 @@ class DeterministicAnnealingFitter {
           measurementGroups,
       const DafFitterOptions<traj_t>& dafOptions,
       DafCandidateMap& candidateState, const AnnealingUtility& annealing,
-      AnnealingUtility::State& annealingState, traj_t& scratchStates) const {
-    scratchStates.clear();
+      AnnealingUtility::State& annealingState, traj_t& scratchStates,
+      const DafReferenceTrajectory* reference = nullptr) const {
+    // Index the reference by surface, so the loop below can ask for a surface's
+    // recorded candidates in one lookup rather than scanning the trajectory.
+    std::unordered_map<const Surface*, const std::vector<std::size_t>*>
+        recordedCandidates;
+    const bool reuseRecorded = reference != nullptr &&
+                               dafOptions.referenceLinearization &&
+                               dafOptions.referenceWeightCalibration;
+    if (reuseRecorded) {
+      for (const DafReferenceState& ref : *reference) {
+        if (ref.hasMeasurement && !ref.candidateIndices.empty()) {
+          recordedCandidates.emplace(ref.surface, &ref.candidateIndices);
+        }
+      }
+    } else {
+      // Only safe when nothing here points into the store: reusing the recorded
+      // candidates means reusing the very rows this would drop.
+      scratchStates.clear();
+    }
 
     for (const auto ts : track.trackStatesReversed()) {
       if (!ts.hasCalibrated()) {
@@ -362,26 +390,58 @@ class DeterministicAnnealingFitter {
 
       std::vector<typename traj_t::TrackStateProxy> candidates;
       candidates.reserve(group.size());
-      for (std::size_t i = 0; i < group.size(); ++i) {
-        TrackStatePropMask mask =
-            (i == 0) ? (TrackStatePropMask::Predicted |
-                       TrackStatePropMask::Calibrated)
-                    : TrackStatePropMask::Calibrated;
-        auto candidate = scratchStates.makeTrackState(mask, kTrackIndexInvalid);
-        // Same reason as in DafActor: a calibrator may need the surface it is
-        // calibrating against, and these scratch states are not part of any
-        // trajectory that would otherwise set it.
-        candidate.setReferenceSurface(surface->getSharedPtr());
-        if (i == 0) {
-          candidate.predicted() = refParams;
-          candidate.predictedCovariance() = refCov;
-        } else {
-          candidate.shareFrom(candidates.front(), TrackStatePropMask::Predicted);
+
+      // Reuse this surface's reference-calibrated candidates when the pass
+      // recorded them and their count still matches the group -- a mismatch
+      // would mean the two are not describing the same surface any more, and
+      // silently scoring N weights against M measurements is worse than paying
+      // for a re-calibration.
+      auto recordedIt = recordedCandidates.find(surface);
+      const bool reuseHere = recordedIt != recordedCandidates.end() &&
+                             recordedIt->second->size() == group.size();
+      if (reuseHere) {
+        for (std::size_t index : *recordedIt->second) {
+          candidates.push_back(scratchStates.getTrackState(index));
         }
-        dafOptions.extensions.calibrator(dafOptions.geoContext,
-                                         dafOptions.calibrationContext.get(),
-                                         group[i], candidate);
-        candidates.push_back(candidate);
+        // The recorded candidates were calibrated on the reference and their
+        // predicted state IS the reference state. Move that expansion point to
+        // the smoothed state so the chi2 is a residual against the fit, leaving
+        // the calibrated measurement itself untouched -- which is the whole
+        // point. Candidates past the first share the first one's predicted
+        // storage (DafActor sets them up that way), so one write covers all.
+        candidates.front().predicted() = refParams;
+        candidates.front().predictedCovariance() = refCov;
+      } else {
+        if (reuseRecorded && recordedIt != recordedCandidates.end()) {
+          ACTS_DEBUG("Recorded candidate count on surface "
+                     << surface->geometryId() << " ("
+                     << recordedIt->second->size() << ") does not match the "
+                     << group.size()
+                     << " in its measurement group; re-calibrating instead");
+        }
+        for (std::size_t i = 0; i < group.size(); ++i) {
+          TrackStatePropMask mask =
+              (i == 0) ? (TrackStatePropMask::Predicted |
+                         TrackStatePropMask::Calibrated)
+                      : TrackStatePropMask::Calibrated;
+          auto candidate =
+              scratchStates.makeTrackState(mask, kTrackIndexInvalid);
+          // Same reason as in DafActor: a calibrator may need the surface it is
+          // calibrating against, and these scratch states are not part of any
+          // trajectory that would otherwise set it.
+          candidate.setReferenceSurface(surface->getSharedPtr());
+          if (i == 0) {
+            candidate.predicted() = refParams;
+            candidate.predictedCovariance() = refCov;
+          } else {
+            candidate.shareFrom(candidates.front(),
+                                TrackStatePropMask::Predicted);
+          }
+          dafOptions.extensions.calibrator(dafOptions.geoContext,
+                                           dafOptions.calibrationContext.get(),
+                                           group[i], candidate);
+          candidates.push_back(candidate);
+        }
       }
 
       std::vector<double> chi2s(group.size());
@@ -901,7 +961,10 @@ class DeterministicAnnealingFitter {
 
       updateCandidateWeights(forwardTrack, measurementGroups, dafOptions,
                              candidateState, annealing, annealingState,
-                             scratchCandidateStates);
+                             scratchCandidateStates,
+                             dafOptions.referenceLinearization
+                                 ? &referenceTrajectory
+                                 : nullptr);
 
       // Record before the annealing step below, so the entry carries the
       // temperature this pass actually ran at rather than the next one's.

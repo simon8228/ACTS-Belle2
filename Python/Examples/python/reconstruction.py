@@ -654,6 +654,7 @@ def addMyDafFitter(
     useMomentMatchedCombiner: bool = False,
     reseedCovarianceScaling: float = 1.0,
     referenceLinearization: bool = False,
+    referenceWeightCalibration: bool = True,
     referenceStartCovarianceScaling: float = 1.0,
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
@@ -739,6 +740,7 @@ def addMyDafFitter(
             useMomentMatchedCombiner=useMomentMatchedCombiner,
             reseedCovarianceScaling=reseedCovarianceScaling,
             referenceLinearization=referenceLinearization,
+            referenceWeightCalibration=referenceWeightCalibration,
             referenceStartCovarianceScaling=referenceStartCovarianceScaling,
             level=customLogLevel(),
         ),
