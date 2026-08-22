@@ -15,6 +15,7 @@
 #include "Acts/EventData/detail/CorrectedTransformationFreeToBound.hpp"
 #include "Acts/Geometry/GeometryIdentifier.hpp"
 #include "Acts/Propagator/DirectNavigator.hpp"
+#include "Acts/Propagator/MaterialInteractor.hpp"
 #include "Acts/Propagator/Navigator.hpp"
 #include "Acts/Propagator/Propagator.hpp"
 #include "Acts/Propagator/SympyStepper.hpp"
@@ -299,8 +300,25 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
                                        initialParameters, directKfOptions,
                                        surfaceSequence, tracks);
         if (result.ok() && options.referenceSurface != nullptr) {
-          Propagator::Options<> extrapolationOptions(options.geoContext,
-                                                     options.magFieldContext);
+          // The perigee lies inside the innermost measurement, so this
+          // extrapolation crosses the CDC inner wall, the SVD, the PXD and the
+          // beam pipe. Without a MaterialInteractor the covariance is
+          // transported through all of it with no multiple scattering added,
+          // and the reported perigee covariance comes out too small -- most
+          // visibly in phi, whose fit uncertainty is the smallest of the six so
+          // the missing term dominates it. Measured 2026-08-22: the implied
+          // missing term scales as 1/p with a constant 3.3 mrad*GeV, i.e.
+          // Highland for ~7% X0, and adding it in quadrature reproduces
+          // GenFit's sigma_phi exactly.
+          //
+          // Scattering and energy loss follow the fit's own switches, so a
+          // no-material fit does not silently acquire material here.
+          Propagator::Options<Acts::ActorList<Acts::MaterialInteractor>>
+              extrapolationOptions(options.geoContext, options.magFieldContext);
+          auto& matInteractor = extrapolationOptions.actorList
+                                    .template get<Acts::MaterialInteractor>();
+          matInteractor.multipleScattering = multipleScattering;
+          matInteractor.energyLoss = energyLoss;
           auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
               result.value(), *options.referenceSurface, referencePropagator,
               extrapolationOptions, kfOptions.referenceSurfaceStrategy);

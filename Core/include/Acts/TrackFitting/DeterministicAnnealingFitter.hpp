@@ -20,6 +20,7 @@
 #include "Acts/MagneticField/MagneticFieldContext.hpp"
 #include "Acts/Propagator/ActorList.hpp"
 #include "Acts/Propagator/DirectNavigator.hpp"
+#include "Acts/Propagator/MaterialInteractor.hpp"
 #include "Acts/Propagator/PropagatorOptions.hpp"
 #include "Acts/TrackFitting/DafFitterError.hpp"
 #include "Acts/TrackFitting/DafOptions.hpp"
@@ -810,8 +811,19 @@ class DeterministicAnnealingFitter {
 
       if (!track.hasReferenceSurface() &&
           dafOptions.referenceSurface != nullptr) {
-        typename propagator_t::template Options<> extrapolationOptions(
-            dafOptions.geoContext, dafOptions.magFieldContext);
+        // Same reasoning as the direct-navigation branch of
+        // ActsExamples::DafFitterFunction: this extrapolation crosses whatever
+        // lies between the innermost measurement and the reference surface, and
+        // without a MaterialInteractor none of that material enters the
+        // transported covariance. Follows the fit's own scattering/energy-loss
+        // switches so a no-material fit stays a no-material fit.
+        typename propagator_t::template Options<ActorList<MaterialInteractor>>
+            extrapolationOptions(dafOptions.geoContext,
+                                 dafOptions.magFieldContext);
+        auto& matInteractor =
+            extrapolationOptions.actorList.template get<MaterialInteractor>();
+        matInteractor.multipleScattering = dafOptions.multipleScattering;
+        matInteractor.energyLoss = dafOptions.energyLoss;
         auto extrapolationResult = extrapolateTrackToReferenceSurface(
             track, *dafOptions.referenceSurface, m_propagator,
             extrapolationOptions, dafOptions.referenceSurfaceStrategy,
