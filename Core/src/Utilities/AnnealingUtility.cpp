@@ -41,7 +41,12 @@ double Acts::AnnealingUtility::getWeight(
 
   double num = computeAnnealingWeight(chi2, currentInvTemp);
 
-  double denom = m_gaussCutTempVec[idx];
+  // One cut-off term per call, or one per competing candidate -- see
+  // Config::cutOffPerCandidate. The latter is GenFit's convention.
+  double denom = m_cfg.cutOffPerCandidate
+                     ? static_cast<double>(allChi2.size()) *
+                           m_gaussCutTempVec[idx]
+                     : m_gaussCutTempVec[idx];
 
   for (double val : allChi2) {
     denom += computeAnnealingWeight(val, currentInvTemp);

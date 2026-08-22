@@ -44,6 +44,31 @@ class AnnealingUtility {
     /// Temperature sequence for annealing process, starts at first value
     /// and progresses towards the last value
     std::vector<double> setOfTemperatures{64., 16., 4., 2., 1.5, 1.};
+
+    /// Count the cut-off term once PER COMPETING CANDIDATE rather than once
+    /// per call, i.e. denominator = N*exp(-cutOff/2T) + sum_k exp(-chi2_k/2T).
+    ///
+    /// The cut-off term is the "none of these hypotheses is right" option. ACTS
+    /// has always admitted one of them per weight evaluation; GenFit's DAF
+    /// admits one per candidate -- its phi_cut accumulates inside the loop over
+    /// measurements (DAF::calcWeights). For an N-candidate surface GenFit's
+    /// outlier option is therefore N times as attractive, and the surface's
+    /// retained weight sum correspondingly lower.
+    ///
+    /// This only bites while the cut-off term is comparable to the signal, i.e.
+    /// at the HOT end of the schedule: for a CDC mirror pair at cutOff 10.83 it
+    /// is a 33% reduction in the wire's total weight at T=100 and nothing at
+    /// all by T=0.56, where exp(-cutOff/2T) has underflowed. Those early passes
+    /// are what decide the basin the fit settles into, since each pass re-seeds
+    /// the next.
+    ///
+    /// Not expressible as a different cutOff: matching it would need
+    /// cutOff' = cutOff - 2T*ln(N), which moves with temperature and goes
+    /// negative at the hot end.
+    ///
+    /// Default false, which leaves every existing caller -- notably
+    /// AdaptiveMultiVertexFitter -- bit-for-bit unchanged.
+    bool cutOffPerCandidate{false};
   };
 
   /// Constructor

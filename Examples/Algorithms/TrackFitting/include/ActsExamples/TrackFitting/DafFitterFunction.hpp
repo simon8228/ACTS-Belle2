@@ -100,6 +100,7 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     double reseedCovarianceScaling = 1.,
     Acts::detail::DafChiSquareDenominator chiSquareDenominator =
         Acts::detail::DafChiSquareDenominator::Full,
+    bool annealingCutOffPerCandidate = false,
     bool referenceLinearization = false,
     bool referenceWeightCalibration = true,
     double referenceStartCovarianceScaling = 1.,

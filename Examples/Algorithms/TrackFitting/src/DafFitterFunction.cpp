@@ -486,6 +486,7 @@ ActsExamples::makeDafFitterFunction(
     double strawInitialWeightRadiusFactor, bool useMomentMatchedCombiner,
     double reseedCovarianceScaling,
     Acts::detail::DafChiSquareDenominator chiSquareDenominator,
+    bool annealingCutOffPerCandidate,
     bool referenceLinearization,
     bool referenceWeightCalibration, double referenceStartCovarianceScaling,
     const Acts::Logger& logger) {
@@ -531,6 +532,8 @@ ActsExamples::makeDafFitterFunction(
   fitterFunction->annealingConfig.setOfTemperatures =
       std::move(annealingTemperatures);
   fitterFunction->annealingConfig.cutOff = annealingCutOff;
+  fitterFunction->annealingConfig.cutOffPerCandidate =
+      annealingCutOffPerCandidate;
   fitterFunction->iterationsPerTemperature = iterationsPerTemperature;
   fitterFunction->maxIterations = maxIterations;
   fitterFunction->strawInitialWeightRadiusFactor =

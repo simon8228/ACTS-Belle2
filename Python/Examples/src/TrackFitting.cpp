@@ -94,6 +94,7 @@ void addTrackFitting(py::module& mex) {
            double strawInitialWeightRadiusFactor,
            bool useMomentMatchedCombiner, double reseedCovarianceScaling,
            const std::string& chiSquareDenominator,
+           bool annealingCutOffPerCandidate,
            bool referenceLinearization, bool referenceWeightCalibration,
            double referenceStartCovarianceScaling, Logging::Level level) {
           // Spelled as a string rather than a bound enum so it survives as one
@@ -122,6 +123,7 @@ void addTrackFitting(py::module& mex) {
               iterationsPerTemperature, maxIterations, useDirectNavigator,
               useKfSequenceHandling, strawInitialWeightRadiusFactor,
               useMomentMatchedCombiner, reseedCovarianceScaling, denominator,
+              annealingCutOffPerCandidate,
               referenceLinearization, referenceWeightCalibration,
               referenceStartCovarianceScaling,
               *getDefaultLogger("Daf", level));
@@ -134,6 +136,7 @@ void addTrackFitting(py::module& mex) {
         "useMomentMatchedCombiner"_a = false,
         "reseedCovarianceScaling"_a = 1.,
         "chiSquareDenominator"_a = "full",
+        "annealingCutOffPerCandidate"_a = false,
         "referenceLinearization"_a = false,
         "referenceWeightCalibration"_a = true,
         "referenceStartCovarianceScaling"_a = 1., "level"_a);
