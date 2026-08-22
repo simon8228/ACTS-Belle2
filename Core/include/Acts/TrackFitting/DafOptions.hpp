@@ -70,7 +70,13 @@ struct DafFitterExtensions {
   /// Calibrates each candidate source link, called once per candidate
   Calibrator calibrator;
 
-  /// Computes the pre-update chi2 of a calibrated candidate
+  /// Computes the pre-update chi2 of a calibrated candidate.
+  ///
+  /// Which covariance that chi2 divides by is NOT a field on this struct -- it
+  /// is fixed by which calculator the caller connects here, see
+  /// detail::DafChiSquareDenominator. Deliberately: an options field would have
+  /// to be read by the delegate, which only receives a track state, so it could
+  /// only ever be silently ignored.
   ChiSquareCalculator chiSquareCalculator;
 
   /// Combines calibrated, weighted candidates into the effective measurement

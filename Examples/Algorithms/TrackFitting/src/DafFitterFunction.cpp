@@ -203,6 +203,12 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   /// DafFitterOptions::reseedCovarianceScaling.
   double reseedCovarianceScaling = 1.;
 
+  /// Which covariance the per-candidate weight chi2 divides by. Full is the
+  /// previous behaviour; MeasurementOnly is GenFit's; Unbiased is the correct
+  /// one for a biased smoothed state. See detail::DafChiSquareDenominator.
+  Acts::detail::DafChiSquareDenominator chiSquareDenominator =
+      Acts::detail::DafChiSquareDenominator::Full;
+
   /// Linearise about a reference trajectory (GenFit's KalmanFitterRefTrack)
   /// instead of the running filtered state. See
   /// DafFitterOptions::referenceLinearization.
@@ -274,9 +280,24 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     Acts::DafFitterExtensions<Acts::VectorMultiTrajectory> extensions;
     extensions.calibrator.template connect<&calibrator_t::calibrate>(
         &calibrator);
-    extensions.chiSquareCalculator
-        .template connect<&Acts::detail::defaultDafChiSquareCalculator<
-            Acts::VectorMultiTrajectory>>();
+    using Denominator = Acts::detail::DafChiSquareDenominator;
+    switch (chiSquareDenominator) {
+      case Denominator::MeasurementOnly:
+        extensions.chiSquareCalculator
+            .template connect<&Acts::detail::defaultDafChiSquareCalculator<
+                Acts::VectorMultiTrajectory, Denominator::MeasurementOnly>>();
+        break;
+      case Denominator::Unbiased:
+        extensions.chiSquareCalculator
+            .template connect<&Acts::detail::defaultDafChiSquareCalculator<
+                Acts::VectorMultiTrajectory, Denominator::Unbiased>>();
+        break;
+      case Denominator::Full:
+        extensions.chiSquareCalculator
+            .template connect<&Acts::detail::defaultDafChiSquareCalculator<
+                Acts::VectorMultiTrajectory, Denominator::Full>>();
+        break;
+    }
     if (useMomentMatchedCombiner) {
       extensions.weightedCombiner
           .template connect<&Acts::detail::momentMatchedDafWeightedCombiner<
@@ -463,7 +484,9 @@ ActsExamples::makeDafFitterFunction(
     std::size_t iterationsPerTemperature, std::size_t maxIterations,
     bool useDirectNavigator, bool useKfSequenceHandling,
     double strawInitialWeightRadiusFactor, bool useMomentMatchedCombiner,
-    double reseedCovarianceScaling, bool referenceLinearization,
+    double reseedCovarianceScaling,
+    Acts::detail::DafChiSquareDenominator chiSquareDenominator,
+    bool referenceLinearization,
     bool referenceWeightCalibration, double referenceStartCovarianceScaling,
     const Acts::Logger& logger) {
   // Stepper should be copied into the fitters. Keep a handle on the field
@@ -514,6 +537,7 @@ ActsExamples::makeDafFitterFunction(
       strawInitialWeightRadiusFactor;
   fitterFunction->useMomentMatchedCombiner = useMomentMatchedCombiner;
   fitterFunction->reseedCovarianceScaling = reseedCovarianceScaling;
+  fitterFunction->chiSquareDenominator = chiSquareDenominator;
   fitterFunction->referenceLinearization = referenceLinearization;
   fitterFunction->referenceWeightCalibration = referenceWeightCalibration;
   fitterFunction->referenceStartCovarianceScaling =

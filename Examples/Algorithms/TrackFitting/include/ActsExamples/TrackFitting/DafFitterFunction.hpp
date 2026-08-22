@@ -14,6 +14,7 @@
 #include "Acts/Geometry/TrackingGeometry.hpp"
 #include "Acts/MagneticField/MagneticFieldProvider.hpp"
 #include "Acts/TrackFitting/DafOptions.hpp"
+#include "Acts/TrackFitting/detail/DafChiSquareCalculator.hpp"
 #include "Acts/Utilities/Logger.hpp"
 #include "ActsExamples/EventData/MeasurementCalibration.hpp"
 #include "ActsExamples/EventData/Track.hpp"
@@ -97,6 +98,8 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     double strawInitialWeightRadiusFactor = 0.,
     bool useMomentMatchedCombiner = false,
     double reseedCovarianceScaling = 1.,
+    Acts::detail::DafChiSquareDenominator chiSquareDenominator =
+        Acts::detail::DafChiSquareDenominator::Full,
     bool referenceLinearization = false,
     bool referenceWeightCalibration = true,
     double referenceStartCovarianceScaling = 1.,

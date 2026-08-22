@@ -22,6 +22,8 @@
 
 #include <cstddef>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #include <pybind11/pybind11.h>
@@ -91,15 +93,35 @@ void addTrackFitting(py::module& mex) {
            bool useDirectNavigator, bool useKfSequenceHandling,
            double strawInitialWeightRadiusFactor,
            bool useMomentMatchedCombiner, double reseedCovarianceScaling,
+           const std::string& chiSquareDenominator,
            bool referenceLinearization, bool referenceWeightCalibration,
            double referenceStartCovarianceScaling, Logging::Level level) {
+          // Spelled as a string rather than a bound enum so it survives as one
+          // readable token from the command line down to the calculator. An
+          // unrecognised value throws instead of falling back to the default:
+          // a silently ignored fitter knob produces a run that looks like the
+          // variant it is named after and is not.
+          using Denominator = Acts::detail::DafChiSquareDenominator;
+          Denominator denominator = Denominator::Full;
+          if (chiSquareDenominator == "full") {
+            denominator = Denominator::Full;
+          } else if (chiSquareDenominator == "measurementOnly") {
+            denominator = Denominator::MeasurementOnly;
+          } else if (chiSquareDenominator == "unbiased") {
+            denominator = Denominator::Unbiased;
+          } else {
+            throw std::invalid_argument(
+                "makeDafFitterFunction: unknown chiSquareDenominator '" +
+                chiSquareDenominator +
+                "'; expected 'full', 'measurementOnly' or 'unbiased'");
+          }
           return makeDafFitterFunction(
               std::move(trackingGeometry), std::move(magneticField),
               multipleScattering, energyLoss, freeToBoundCorrection,
               std::move(annealingTemperatures), annealingCutOff,
               iterationsPerTemperature, maxIterations, useDirectNavigator,
               useKfSequenceHandling, strawInitialWeightRadiusFactor,
-              useMomentMatchedCombiner, reseedCovarianceScaling,
+              useMomentMatchedCombiner, reseedCovarianceScaling, denominator,
               referenceLinearization, referenceWeightCalibration,
               referenceStartCovarianceScaling,
               *getDefaultLogger("Daf", level));
@@ -111,6 +133,7 @@ void addTrackFitting(py::module& mex) {
         "strawInitialWeightRadiusFactor"_a = 0.,
         "useMomentMatchedCombiner"_a = false,
         "reseedCovarianceScaling"_a = 1.,
+        "chiSquareDenominator"_a = "full",
         "referenceLinearization"_a = false,
         "referenceWeightCalibration"_a = true,
         "referenceStartCovarianceScaling"_a = 1., "level"_a);

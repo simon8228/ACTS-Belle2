@@ -653,6 +653,7 @@ def addMyDafFitter(
     strawInitialWeightRadiusFactor: float = 0.0,
     useMomentMatchedCombiner: bool = False,
     reseedCovarianceScaling: float = 1.0,
+    chiSquareDenominator: str = "full",
     referenceLinearization: bool = False,
     referenceWeightCalibration: bool = True,
     referenceStartCovarianceScaling: float = 1.0,
@@ -695,6 +696,25 @@ def addMyDafFitter(
     handful of events being visualised rather than a production run. Pass
     `weightTraceEvents=[3, 17, 42]` to write it for those event numbers only,
     which keeps a full production fit and its per-pass plots in a single run.
+
+    `chiSquareDenominator` picks the covariance the per-candidate weight chi2
+    divides its residual by, which is how decisively the DAF resolves a wire's
+    left/right ambiguity (the weight is exp(-chi2/2T), so a smaller denominator
+    means a sharper choice). The residual is taken against the previous pass's
+    SMOOTHED state, which already absorbed the measurement:
+
+      "full"             H C H^T + R -- the historical ACTS choice. Correct only
+                         if the state were independent of the measurement.
+      "measurementOnly"  R alone -- what GenFit's DAF uses
+                         (getResidual(.., onlyMeasurementErrors=true)).
+      "unbiased"         R - H C H^T -- the statistically correct covariance of
+                         a residual against a biased smoothed state. Falls back
+                         to R per candidate where the subtraction is not
+                         positive definite.
+
+    Ordered unbiased < measurementOnly < full, so each is sharper than the last.
+    Note the interaction with ACTS_DAF_UNBIASED=1: that makes the state itself
+    unbiased, at which point "full" becomes the correct choice.
 
     KF-equivalence knobs (both default off; enable together with a degenerate
     annealing schedule to make a DAF run comparable to addMyFitter's plain KF):
@@ -739,6 +759,7 @@ def addMyDafFitter(
             strawInitialWeightRadiusFactor=strawInitialWeightRadiusFactor,
             useMomentMatchedCombiner=useMomentMatchedCombiner,
             reseedCovarianceScaling=reseedCovarianceScaling,
+            chiSquareDenominator=chiSquareDenominator,
             referenceLinearization=referenceLinearization,
             referenceWeightCalibration=referenceWeightCalibration,
             referenceStartCovarianceScaling=referenceStartCovarianceScaling,
