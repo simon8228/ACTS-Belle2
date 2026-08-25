@@ -40,3 +40,9 @@ codegen/src/codegen.egg-info/
 !.clang-tidy
 !.oclint
 !.devcontainer
+
+# CMake FetchContent output. _deps/pybind11-src was committed by accident
+# in e715e0b15 as a gitlink (mode 160000) with no .gitmodules entry, so git
+# tracked a pointer to a repo it had no URL for and reported it modified on
+# every status. Ignore the whole directory, not just that one entry.
+_deps/
