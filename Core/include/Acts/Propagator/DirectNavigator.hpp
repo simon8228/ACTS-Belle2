@@ -23,10 +23,71 @@
 #include "Acts/Utilities/Logger.hpp"
 #include "Acts/Utilities/Result.hpp"
 
+#include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <memory>
+#include <utility>
 
 namespace Acts {
+
+namespace detail {
+
+/// Look-ahead window for the DirectNavigator's sequence reorder, read once from
+/// ACTS_DN_LOOKAHEAD. 0 (the default) disables it, leaving the navigator
+/// byte-for-byte as it was.
+///
+/// The navigator walks its sequence with a monotonically advancing index and
+/// drops any surface it cannot intersect ahead of the current position
+/// (`nearLimit`, -100 um). There is no way back, so a sequence that is locally
+/// out of order loses hits silently: the pair is visited in the wrong order,
+/// the second one is then behind, and it is skipped for good. The fitters never
+/// see it -- the surface is not a hole and not an outlier, it simply never
+/// becomes a track state.
+///
+/// That happens because the sequence is sorted analytically, before the fit,
+/// from the seed helix in a uniform field with no energy loss
+/// (ActsExamples::prepareDirectNavigationSequence), while the propagation
+/// follows the real trajectory. Measured on a 400-event Belle II CDC DAF fit,
+/// hits lost this way are enriched 9x in truth-order inversion against a
+/// sequence neighbour (18.5% against 2.0% for hits that were processed), and
+/// the median arc-length gap between neighbouring straws is only ~19 mm, so a
+/// small seed error is enough to flip a pair.
+///
+/// The window closes exactly that gap: rather than trusting slot i, intersect
+/// the next `1 + lookahead` surfaces from where the track ACTUALLY is and take
+/// the one it reaches first, swapping it into slot i. On an already-correct
+/// sequence the nearest surface IS the next one, so nothing moves. This is a
+/// cheap, local version of what GenFit's KalmanFitterRefTrack gets by sorting
+/// on the propagated path length and re-preparing until the order stops
+/// changing (KalmanFitterRefTrack::processTrackWithRep).
+///
+/// Use 1. Measured on the same 400-event fit, of the 713 hits still lost this
+/// way once loop protection is off, a window of 1 would have reached 210
+/// (29.5%) first -- and widening it barely moves that: 29.7% at 2, 29.9% at 3,
+/// 30.4% at 5. The recoverable population is adjacent pairs, so a wider window
+/// buys nothing while inviting a mis-rank, the intersections being taken with
+/// `BoundaryTolerance::Infinite()` (a distant surface can report a short path
+/// to a point nowhere near its bounds).
+///
+/// The other ~70% are NOT a local ordering problem and this knob cannot reach
+/// them; they are still unexplained.
+///
+/// @note A research knob, matching how the Belle II fork A/Bs the rest of the
+///       direct-navigation chain. It belongs in DirectNavigator::Options before
+///       this goes anywhere near upstream.
+/// @return The configured look-ahead window
+inline std::size_t directNavigatorLookahead() {
+  static const std::size_t value = [] {
+    const char* env = std::getenv("ACTS_DN_LOOKAHEAD");
+    return env == nullptr
+               ? std::size_t{0}
+               : static_cast<std::size_t>(std::strtoul(env, nullptr, 10));
+  }();
+  return value;
+}
+
+}  // namespace detail
 
 /// @brief A fully guided navigator
 ///
@@ -291,6 +352,11 @@ class DirectNavigator {
     // Move the sequence to the next surface
     state.nextSurface();
 
+    // Surfaces considered per step: just the next one unless a look-ahead
+    // window is configured, in which case the nearest of the next few wins and
+    // is swapped into place. See detail::directNavigatorLookahead.
+    const std::size_t lookahead = detail::directNavigatorLookahead();
+
     while (!state.endOfSurfaces()) {
       ACTS_VERBOSE("Next surface candidate is "
                    << state.navSurface().geometryId() << ". "
@@ -300,18 +366,59 @@ class DirectNavigator {
 
       // Establish & update the surface status
       // TODO we do not know the intersection index - passing the closer one
-      const Surface& surface = state.navSurface();
       const double farLimit = std::numeric_limits<double>::max();
-      const NavigationTarget target = chooseIntersection(
-          state.options.geoContext, surface, position, direction,
-          BoundaryTolerance::Infinite(), state.options.nearLimit, farLimit,
-          state.options.surfaceTolerance);
-      if (target.isValid()) {
-        return target;
+      const std::int32_t step =
+          state.direction == Direction::Forward() ? 1 : -1;
+      const std::int32_t nSurfaces =
+          static_cast<std::int32_t>(state.options.externalSurfaces.size());
+
+      NavigationTarget best = NavigationTarget::None();
+      std::int32_t bestIndex = state.surfaceIndex;
+
+      for (std::size_t ahead = 0; ahead <= lookahead; ++ahead) {
+        const std::int32_t index =
+            state.surfaceIndex + step * static_cast<std::int32_t>(ahead);
+        if (index < 0 || index >= nSurfaces) {
+          break;
+        }
+        const Surface& candidateSurface = *state.options.externalSurfaces[index];
+        const NavigationTarget candidate = chooseIntersection(
+            state.options.geoContext, candidateSurface, position, direction,
+            BoundaryTolerance::Infinite(), state.options.nearLimit, farLimit,
+            state.options.surfaceTolerance);
+        if (!candidate.isValid()) {
+          continue;
+        }
+        // Reached first wins. With lookahead == 0 this runs once and the
+        // behaviour is identical to taking state.navSurface() directly.
+        if (!best.isValid() || candidate.pathLength() < best.pathLength()) {
+          best = candidate;
+          bestIndex = index;
+        }
+      }
+
+      if (best.isValid()) {
+        if (bestIndex != state.surfaceIndex) {
+          // Both slots are ahead of the walk, so reordering them cannot
+          // disturb anything already visited; navSurface() and
+          // handleSurfaceReached stay consistent because the chosen surface
+          // now sits at the current index.
+          ACTS_VERBOSE(
+              "Reordering: "
+              << state.options.externalSurfaces[bestIndex]->geometryId()
+              << " is reached before "
+              << state.options.externalSurfaces[state.surfaceIndex]->geometryId()
+              << ", moving it up " << (bestIndex - state.surfaceIndex)
+              << " slot(s).");
+          std::swap(state.options.externalSurfaces[state.surfaceIndex],
+                    state.options.externalSurfaces[bestIndex]);
+        }
+        return best;
       }
 
       ACTS_VERBOSE("No valid intersection found with surface "
-                   << surface.geometryId() << ", trying next surface.");
+                   << state.navSurface().geometryId()
+                   << ", trying next surface.");
       state.nextSurface();
     }
 
