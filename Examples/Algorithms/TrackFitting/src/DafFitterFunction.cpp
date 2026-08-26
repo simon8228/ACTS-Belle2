@@ -132,6 +132,44 @@ double pathLimitScale() {
   return value;
 }
 
+/// Restore Acts' loop protection on the direct-navigation fit
+/// (ACTS_LOOP_PROTECTION=1), which this branch otherwise switches off. The
+/// KF reads the same variable -- this is a propagator-level concern, not a DAF
+/// one, and KalmanFitterFunction.cpp carries the identical block.
+///
+/// Loop protection caps the propagation at `loopFraction * 2*pi*p/B` -- half a
+/// helix turn with the Acts defaults (PropagatorOptions.hpp: loopProtection =
+/// true, loopFraction = 0.5). It is the right guard for the geometric Navigator,
+/// which has no idea how far it should go, but here the prepared sequence
+/// already bounds the propagation and pathLimit below is sized from its span.
+/// The two do not compose: `Propagator::initialize` lowers the propagator's
+/// aborter to the loop limit, and `DafActor::act` sets its OWN result-side
+/// aborter to it outright (releaseLimit = true), so the computed pathLimit is
+/// overridden and no pass can span more than half a turn. When that limit
+/// fires DafActor sets `finished = true` -- a clean finish, not an error -- so
+/// the remaining sequence surfaces are never visited, keep the 1/N seed weights
+/// the fitter gave them up front, and are not even counted as holes.
+///
+/// Measured 2026-08-26 on acts_daf_blowup_noreset, 400 events: 64.4% of the
+/// hits that reach the export unprocessed lie past the half-turn limit against
+/// 0.81% of processed hits, the limit undercuts the pathLimit computed here on
+/// 7.8% of tracks, and the unprocessed rate runs 13-27% below 300 MeV against
+/// 0.1-0.3% above 500 MeV. Note this also makes ACTS_DAF_PATH_SCALE testable:
+/// while loop protection clamps below it, that knob cannot do anything.
+///
+/// Switching it off does not remove path limiting. `Propagator::makeState`
+/// appends a PathLimitReached aborter carrying `options.pathLimit`
+/// (Propagator.ipp:255), so the limit computed from the sequence span governs;
+/// `setupLoopProtection` early-returns on this flag, leaving DafActor's own
+/// aborter inert at its max() default.
+bool loopProtection() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_LOOP_PROTECTION");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return value;
+}
+
 /// Score DAF candidate weights against the unbiased smoothed state.
 bool useUnbiasedSmoothedState() {
   static const bool value = [] {
@@ -418,6 +456,10 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
             pathLimitScale() *
             std::max(1.5 * Acts::UnitConstants::m,
                      1.5 * sequenceSpan + 0.5 * Acts::UnitConstants::m);
+        // ...and let that limit actually govern: Acts' loop protection would
+        // otherwise clamp the pass to half a helix turn regardless. See
+        // loopProtection() above for why that is wrong here and what it costs.
+        dafOptions.propagatorPlainOptions.loopProtection = loopProtection();
         if (maxStepsOverride() > 0) {
           dafOptions.propagatorPlainOptions.maxSteps = maxStepsOverride();
         }

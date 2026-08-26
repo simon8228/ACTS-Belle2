@@ -141,6 +141,25 @@ unsigned maxStepsOverride() {
   }();
   return value;
 }
+
+/// Restore Acts' loop protection on the direct-navigation fit
+/// (ACTS_LOOP_PROTECTION=1), which this branch otherwise switches off. The DAF
+/// reads the same variable; DafFitterFunction.cpp carries the full rationale
+/// and the measurements. In short: loop protection caps the propagation at
+/// half a helix turn (loopFraction = 0.5), which overrides the pathLimit sized
+/// from the sequence span below, and KalmanFitter.hpp:355 sets its own
+/// result-side aborter to that limit outright. Any track whose hits span more
+/// than half a revolution is silently truncated there.
+///
+/// Path limiting is not lost: `Propagator::makeState` appends a
+/// PathLimitReached aborter carrying `options.pathLimit` (Propagator.ipp:255).
+bool loopProtection() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_LOOP_PROTECTION");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return value;
+}
 }  // namespace
 
 using namespace ActsExamples;
@@ -292,6 +311,10 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
         directKfOptions.propagatorPlainOptions.pathLimit =
             std::max(1.5 * Acts::UnitConstants::m,
                      1.5 * sequenceSpan + 0.5 * Acts::UnitConstants::m);
+        // ...and let that limit actually govern: Acts' loop protection would
+        // otherwise clamp the pass to half a helix turn regardless. See
+        // loopProtection() above.
+        directKfOptions.propagatorPlainOptions.loopProtection = loopProtection();
         if (maxStepsOverride() > 0) {
           directKfOptions.propagatorPlainOptions.maxSteps = maxStepsOverride();
         }
