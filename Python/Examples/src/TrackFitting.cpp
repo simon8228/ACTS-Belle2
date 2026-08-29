@@ -53,7 +53,7 @@ void addTrackFitting(py::module& mex) {
       inputClusters, inputMeasurementParticlesMap, outputTracks,
       trackingGeometry, fit, pickTrack, calibrator, linkForward, maxSteps,
       outputCandidatesDir, outputWeightTrace, weightTraceEvents,
-      protoTrackCandidatesOnly);
+      outputLinearizationTrace, protoTrackCandidatesOnly);
 
   {
     py::class_<TrackFitterFunction, std::shared_ptr<TrackFitterFunction>>(
@@ -95,8 +95,18 @@ void addTrackFitting(py::module& mex) {
            bool useMomentMatchedCombiner, double reseedCovarianceScaling,
            const std::string& chiSquareDenominator,
            bool annealingCutOffPerCandidate,
-           bool referenceLinearization, bool referenceWeightCalibration,
-           double referenceStartCovarianceScaling, Logging::Level level) {
+           double weightConvergenceTolerance,
+           std::size_t minAnnealingIterations,
+           double pValueConvergenceTolerance, double pValueMinimum,
+           std::size_t pValueMinIterations, bool reseedResetOffDiagonals,
+           double reseedVarianceCeiling, double reseedAngleVarianceCeiling,
+           bool useTwoFilterSmoothing, double twoFilterBlowUpFactor,
+           bool referencePiecewise, bool referenceAnchorSmoothed,
+           bool referencePiecewiseSelfCheck, bool referenceLinearization, bool referenceWeightCalibration,
+           double referenceStartCovarianceScaling,
+           bool referenceStartResetOffDiagonals,
+           double referenceStartVarianceCeiling,
+           double referenceStartAngleVarianceCeiling, Logging::Level level) {
           // Spelled as a string rather than a bound enum so it survives as one
           // readable token from the command line down to the calculator. An
           // unrecognised value throws instead of falling back to the default:
@@ -125,7 +135,15 @@ void addTrackFitting(py::module& mex) {
               useMomentMatchedCombiner, reseedCovarianceScaling, denominator,
               annealingCutOffPerCandidate,
               referenceLinearization, referenceWeightCalibration,
-              referenceStartCovarianceScaling,
+              referenceStartCovarianceScaling, referenceStartResetOffDiagonals,
+              referenceStartVarianceCeiling,
+              referenceStartAngleVarianceCeiling, weightConvergenceTolerance,
+              minAnnealingIterations, pValueConvergenceTolerance,
+              pValueMinimum, pValueMinIterations, reseedResetOffDiagonals,
+              reseedVarianceCeiling, reseedAngleVarianceCeiling,
+              useTwoFilterSmoothing, twoFilterBlowUpFactor,
+              referencePiecewise, referenceAnchorSmoothed,
+              referencePiecewiseSelfCheck,
               *getDefaultLogger("Daf", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
@@ -137,9 +155,23 @@ void addTrackFitting(py::module& mex) {
         "reseedCovarianceScaling"_a = 1.,
         "chiSquareDenominator"_a = "full",
         "annealingCutOffPerCandidate"_a = false,
+        "weightConvergenceTolerance"_a = 0.,
+        "minAnnealingIterations"_a = 1,
+        "pValueConvergenceTolerance"_a = 0., "pValueMinimum"_a = 0.,
+        "pValueMinIterations"_a = 5,
+        "reseedResetOffDiagonals"_a = false,
+        "reseedVarianceCeiling"_a = 0.,
+        "reseedAngleVarianceCeiling"_a = 0.,
+        "useTwoFilterSmoothing"_a = false,
+        "twoFilterBlowUpFactor"_a = 1000.,
+        "referencePiecewise"_a = false, "referenceAnchorSmoothed"_a = false,
+        "referencePiecewiseSelfCheck"_a = false,
         "referenceLinearization"_a = false,
         "referenceWeightCalibration"_a = true,
-        "referenceStartCovarianceScaling"_a = 1., "level"_a);
+        "referenceStartCovarianceScaling"_a = 1.,
+        "referenceStartResetOffDiagonals"_a = true,
+        "referenceStartVarianceCeiling"_a = 1.e6,
+        "referenceStartAngleVarianceCeiling"_a = 0.01, "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(
         mex, "MeasurementCalibrator");

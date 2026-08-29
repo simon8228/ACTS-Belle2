@@ -9,7 +9,9 @@
 #pragma once
 
 #include "Acts/Definitions/TrackParametrization.hpp"
+#include "Acts/EventData/MeasurementHelpers.hpp"
 #include "Acts/EventData/MultiTrajectory.hpp"
+#include "Acts/EventData/SubspaceHelpers.hpp"
 #include "Acts/EventData/SourceLink.hpp"
 #include "Acts/EventData/TrackParameterHelpers.hpp"
 #include "Acts/EventData/TrackStatePropMask.hpp"
@@ -20,7 +22,14 @@
 #include "Acts/Utilities/Result.hpp"
 #include "Acts/Utilities/TrackHelpers.hpp"
 
+#include <Eigen/Eigenvalues>
+
+#include <cmath>
 #include <cstddef>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <tuple>
 #include <vector>
 
 namespace Acts::detail {
@@ -80,7 +89,122 @@ Result<typename track_container_t::TrackProxy> dafReferenceFilter(
   BoundVector previousFiltered = BoundVector::Zero();
   BoundSquareMatrix previousFilteredCovariance = BoundSquareMatrix::Zero();
   BoundVector previousReference = BoundVector::Zero();
+  BoundVector lastDeviation = BoundVector::Zero();
   bool hasPrevious = false;
+
+  // Per-step trace of exactly what the affine map consumes: x_ref, the
+  // deviation it is applied to, F and Q. Everything here is cached by the
+  // reference pass -- nothing in this loop propagates or touches geometry --
+  // so this is the whole input to the filter, in one place.
+  const bool traceSteps = logger.doPrint(Logging::DEBUG);
+
+  // Flag thresholds. Each is a statement about when a quantity stops meaning
+  // what the filter assumes it means, not a tuned cut.
+  constexpr double kDriftLoc0Warn = 2.0;    // mm, linear expansion in position
+  constexpr double kDriftQopWarn = 0.05;    // relative, 5% in q/p
+  constexpr double kChi2Warn = 25.0;        // one candidate against the fit
+  std::size_t warnDrift = 0, warnChi2 = 0, alertZeroNoise = 0, alertNotPD = 0;
+  auto fmt = [](const BoundVector& v) {
+    std::ostringstream os;
+    os << std::scientific << std::setprecision(4) << "loc0=" << v[eBoundLoc0]
+       << " loc1=" << v[eBoundLoc1] << " phi=" << v[eBoundPhi]
+       << " theta=" << v[eBoundTheta] << " qop=" << v[eBoundQOverP];
+    return os.str();
+  };
+  auto fmtSqrtDiag = [](const BoundSquareMatrix& m) {
+    std::ostringstream os;
+    os << std::scientific << std::setprecision(3);
+    const char* names[] = {"loc0", "loc1", "phi", "theta", "qop"};
+    for (int i = 0; i < 5; ++i) {
+      os << (i ? " " : "") << names[i] << "="
+         << std::sqrt(std::max(0., m(i, i)));
+    }
+    return os.str();
+  };
+  // How far F departs from the identity, and the largest deviation the linear
+  // model was asked to transport. A deviation that stops being small is the
+  // signal that linearising about this reference has stopped being valid.
+  // loc1 is reported SEPARATELY and deliberately. On a straw it is the
+  // position along the wire, which no measurement constrains (H is loc0 only),
+  // so the POCA slides freely and loc1 dominates a plain max-over-components
+  // by two orders of magnitude -- it swamped this metric on the first run and
+  // made a converging fit look divergent. The measured components are what say
+  // whether linearising about this reference is still valid.
+  double worstDeviation = 0., worstAlongWire = 0.;
+  std::size_t worstDeviationIndex = 0;
+  std::size_t stepIndex = 0;
+
+  // Covariance conditioning. Two places in this scheme meet a covariance whose
+  // condition number is large BY CONSTRUCTION -- the bound parametrisation
+  // mixes mm and rad, so dloc1/dtheta runs to hundreds of mm/rad on a metre-long
+  // wire, and the re-seed deliberately imposes an eight-order spread (ceilings
+  // 1e6 on loc0/loc1/qop against 0.01 rad^2 on phi/theta):
+  //
+  //   * the gain-matrix update uses the SHORT form C <- (I - K H) C
+  //     (GainMatrixUpdaterImpl.hpp:69), which is algebraically right but
+  //     preserves neither symmetry nor positive-definiteness, and runs ~50
+  //     times per pass;
+  //   * the RTS smoother inverts the PREDICTED covariance outright.
+  //
+  // Symmetry error and the smallest eigenvalue are what detect either going
+  // wrong. Only the 5x5 spatial block is examined: eBoundTime is unconstrained
+  // here, so including it would report an eigenvalue near zero on every step
+  // and say nothing about the parameters the fit actually determines.
+  // Symplectic check, done as a RUNNING PRODUCT rather than per step.
+  //
+  // det(F) for a SINGLE step is not an invariant and must not be read as one.
+  // ACTS composes F_bound = J(free->bound at B) . T(A->B) . J(bound->free at A);
+  // only the middle factor is symplectic. The outer two are parametrisation
+  // changes at different surfaces and cancel only when both present the same
+  // frame -- a CDC layer boundary is a cylinder in (r.phi, z), a straw is a
+  // line surface in (drift, along-wire) whose axis is wire x direction. So a
+  // layer<->straw step carries the RATIO of those projections and reads far
+  // from 1 while being perfectly correct.
+  //
+  // Measured over 36 passes: per-step det ranges 0.75-1.33, consecutive steps
+  // are anti-correlated (lag-1 r = -0.69), and the product over ~110 steps has
+  // median 1.0000, range [0.903, 1.023] -- against [0.394, 2.5] for a random
+  // walk with the same per-step spread. The product telescopes to the frame
+  // ratio between the track's two endpoints, and THAT is bounded near 1.
+  // straw->straw steps alone, where the frames match, give 0.9966.
+  double logDetProduct = 0.;
+  std::size_t nonPositiveDet = 0;
+  double worstAsymmetry = 0., smallestEigenvalue = 0., worstCondition = 0.;
+  std::size_t worstAsymmetryIndex = 0, smallestEigenvalueIndex = 0,
+              worstConditionIndex = 0, indefiniteCount = 0;
+  bool haveEigenvalues = false;
+  auto conditioning = [](const BoundSquareMatrix& cov) {
+    const SquareMatrix<5> block = cov.topLeftCorner<5, 5>();
+    const double asymmetry =
+        (block - block.transpose()).cwiseAbs().maxCoeff();
+    Eigen::SelfAdjointEigenSolver<SquareMatrix<5>> solver;
+    // Symmetrised first: the solver reads one triangle, so feeding it an
+    // asymmetric matrix would silently hide the very defect being looked for.
+    solver.compute(0.5 * (block + block.transpose()),
+                   Eigen::EigenvaluesOnly);
+    const auto& lambda = solver.eigenvalues();
+    return std::make_tuple(asymmetry, lambda(0), lambda(4));
+  };
+  auto recordConditioning = [&](const BoundSquareMatrix& cov,
+                                std::size_t index) {
+    const auto [asymmetry, minEigen, maxEigen] = conditioning(cov);
+    if (asymmetry > worstAsymmetry) {
+      worstAsymmetry = asymmetry;
+      worstAsymmetryIndex = index;
+    }
+    if (!haveEigenvalues || minEigen < smallestEigenvalue) {
+      smallestEigenvalue = minEigen;
+      smallestEigenvalueIndex = index;
+      haveEigenvalues = true;
+    }
+    if (minEigen <= 0.) {
+      ++indefiniteCount;
+    } else if (maxEigen / minEigen > worstCondition) {
+      worstCondition = maxEigen / minEigen;
+      worstConditionIndex = index;
+    }
+    return std::make_tuple(asymmetry, minEigen, maxEigen);
+  };
 
   for (const DafReferenceState& ref : reference) {
     const TrackStatePropMask mask =
@@ -124,6 +248,112 @@ Result<typename track_container_t::TrackProxy> dafReferenceFilter(
       trackStateProxy.predictedCovariance() =
           ref.jacobian * previousFilteredCovariance * ref.jacobian.transpose() +
           ref.noise;
+
+      BoundVector measured = deviation.cwiseAbs();
+      measured[eBoundLoc1] = 0.;
+      const double maxDeviation = measured.maxCoeff();
+      if (maxDeviation > worstDeviation) {
+        worstDeviation = maxDeviation;
+        worstDeviationIndex = stepIndex;
+      }
+      worstAlongWire =
+          std::max(worstAlongWire, std::abs(deviation[eBoundLoc1]));
+      lastDeviation = deviation;
+    }
+
+    if (traceSteps) {
+      const BoundVector predicted = trackStateProxy.predicted();
+      const BoundSquareMatrix& covPred = trackStateProxy.predictedCovariance();
+      const auto [asymP, minP, maxP] =
+          recordConditioning(covPred, stepIndex);
+      const double condP =
+          minP > 0. ? maxP / minP : std::numeric_limits<double>::infinity();
+
+      // NOT the annealing pass -- that is the "DAF pass k/N at T=..." banner,
+      // and there are at most maxIterations of those. This index counts
+      // SURFACES along the reference trajectory, of which a CDC track has
+      // ~115: roughly 50 straws plus the material layers between them.
+      ACTS_DEBUG("[Ref surface " << stepIndex << "/" << reference.size()
+                 << "] " << ref.surface->geometryId()
+                 << " | Type: "
+                 << (ref.hasMeasurement ? "MEASUREMENT"
+                                        : (ref.isHole ? "HOLE" : "MATERIAL"))
+                 << " | s = " << ref.pathLength << " mm");
+
+      // Linearisation distance -- how far the estimate has moved from the
+      // point F and the calibration were evaluated at. loc1 is quoted
+      // separately throughout because nothing measures it: on a straw it is
+      // the position along the wire, so the POCA slides freely and a plain
+      // norm over all components reports that slide and nothing else.
+      const double driftLoc0 = std::abs(lastDeviation[eBoundLoc0]);
+      const double refQop = ref.parameters[eBoundQOverP];
+      const double relQop =
+          std::abs(predicted[eBoundQOverP] - refQop) /
+          std::max(std::abs(refQop), std::numeric_limits<double>::min());
+      const bool drifted =
+          hasPrevious && (driftLoc0 > kDriftLoc0Warn || relQop > kDriftQopWarn);
+      warnDrift += static_cast<std::size_t>(drifted);
+      ACTS_DEBUG("  State (pred) : loc0=" << predicted[eBoundLoc0]
+                 << " loc1=" << predicted[eBoundLoc1]
+                 << " qop=" << predicted[eBoundQOverP]
+                 << "  (ref qop=" << refQop << ", d|qop|/qop="
+                 << 100. * relQop << "%, dx_lin loc0=" << driftLoc0
+                 << " mm, loc1=" << std::abs(lastDeviation[eBoundLoc1])
+                 << " mm)");
+      if (drifted) {
+        ACTS_DEBUG("  [WARN] Linearization drift: the linear expansion of F "
+                   "and H is being applied far from where they were evaluated");
+      }
+
+      // det(F) is a direct check on the stepper: the transport of a charged
+      // particle through a static field is symplectic, so away from material
+      // det(F) must stay at 1. A drift away from 1 is the integrator failing,
+      // not the fit disagreeing with anything.
+      const BoundMatrix fMinusIdentity = ref.jacobian - BoundMatrix::Identity();
+      const double detF = ref.jacobian.determinant();
+      if (detF > 0.) {
+        logDetProduct += std::log(detF);
+      } else {
+        ++nonPositiveDet;
+      }
+      ACTS_DEBUG("  Prop Matrix  : max|F-I| = "
+                 << fMinusIdentity.cwiseAbs().maxCoeff()
+                 << ", running prod det(F) = " << std::exp(logDetProduct)
+                 << ", diag = " << ref.jacobian(0, 0) << " "
+                 << ref.jacobian(1, 1) << " " << ref.jacobian(2, 2) << " "
+                 << ref.jacobian(3, 3) << " " << ref.jacobian(4, 4));
+
+      ACTS_DEBUG("  Covariance   : cond(C_pred) = " << condP
+                 << ", min_eigen = " << minP << ", tr = " << covPred.trace()
+                 << ", |C-C^T| = " << asymP);
+      if (minP <= 0.) {
+        ++alertNotPD;
+        ACTS_DEBUG("  [FATAL] Non-PD covariance: smallest eigenvalue "
+                   << minP << " -- the update has lost positive-definiteness");
+      }
+
+      // Material and the noise it produced, over the SAME segment. Both are
+      // accumulated between recorded surfaces and reset together, so they can
+      // be compared directly -- which is what makes the alert below mean
+      // something. A surface merely FLAGGED hasMaterial with a zero Q is
+      // normal: its material lands in the next segment.
+      if (ref.thicknessInX0 > 0. || ref.hasMaterial) {
+        const double qTheta = ref.noise(eBoundTheta, eBoundTheta);
+        const double qQop = ref.noise(eBoundQOverP, eBoundQOverP);
+        ACTS_DEBUG("  Material     : x/X0 = " << ref.thicknessInX0
+                   << ", dE = " << ref.energyLoss / UnitConstants::MeV
+                   << " MeV   [segment ending here]");
+        ACTS_DEBUG("  Proc Noise Q : Q(theta,theta) = " << qTheta
+                   << " (MS), Q(qop,qop) = " << qQop << " (straggling)"
+                   << ", sqrt(diag Q): " << fmtSqrtDiag(ref.noise));
+        if (ref.thicknessInX0 > 0. && qTheta == 0. && qQop == 0.) {
+          ++alertZeroNoise;
+          ACTS_DEBUG("  [ALERT] Zero material noise: x/X0 = "
+                     << ref.thicknessInX0
+                     << " was crossed but Q is identically zero -- the noise "
+                        "calculator produced nothing from a real slab");
+        }
+      }
     }
 
     auto typeFlags = trackStateProxy.typeFlags();
@@ -157,6 +387,49 @@ Result<typename track_container_t::TrackProxy> dafReferenceFilter(
         constCandidates.push_back(candidateStore.getTrackState(index));
       }
 
+      // Per candidate, BEFORE they are collapsed into one effective
+      // measurement -- once combined the individual residuals are gone, and
+      // they are what says whether a mirror pair is being separated or is
+      // still sharing weight.
+      if (traceSteps) {
+        for (std::size_t i = 0; i < constCandidates.size(); ++i) {
+          const auto& candidate = constCandidates[i];
+          visit_measurement(candidate.calibratedSize(), [&](auto N) {
+            constexpr std::size_t kSize = decltype(N)::value;
+            const auto subspace = FixedBoundSubspaceHelper<kSize>(
+                candidate.template projectorSubspaceIndices<kSize>());
+            const auto H = subspace.projector();
+            const Vector<kSize> residual =
+                candidate.template calibrated<kSize>() -
+                H * trackStateProxy.predicted();
+            const SquareMatrix<kSize> S =
+                H * trackStateProxy.predictedCovariance() * H.transpose() +
+                candidate.template calibratedCovariance<kSize>();
+            const double chi2 =
+                (residual.transpose() * S.inverse() * residual).value();
+            std::ostringstream pulls;
+            pulls << std::fixed << std::setprecision(2);
+            for (std::size_t d = 0; d < kSize; ++d) {
+              pulls << (d ? ", " : "")
+                    << residual[d] / std::sqrt(std::max(S(d, d), 1e-300));
+            }
+            warnChi2 += static_cast<std::size_t>(chi2 > kChi2Warn);
+            ACTS_DEBUG("  Measurement  : cand " << i << "/"
+                       << constCandidates.size() << "  res = ["
+                       << residual.transpose() << "]  S_diag = ["
+                       << S.diagonal().transpose() << "]  chi2_inc = " << chi2
+                       << "  pull = [" << pulls.str() << "]  DAF_weight = "
+                       << candState.weights[i]);
+            if (chi2 > kChi2Warn) {
+              ACTS_DEBUG("  [WARN] High chi2: candidate " << i << " sits "
+                         << std::sqrt(chi2)
+                         << " sigma from the prediction -- an outlier, or the "
+                            "prediction has drifted");
+            }
+          });
+        }
+      }
+
       options.extensions.weightedCombiner(constCandidates, candState.weights,
                                           trackStateProxy);
 
@@ -183,6 +456,30 @@ Result<typename track_container_t::TrackProxy> dafReferenceFilter(
       }
       typeFlags.setIsMeasurement();
 
+      if (traceSteps) {
+        const BoundSquareMatrix& covFilt = trackStateProxy.filteredCovariance();
+        const auto [asymF, minF, maxF] = recordConditioning(covFilt, stepIndex);
+        // tr(C) before against after: the update must remove information, so
+        // the trace has to fall. A trace that GROWS across an update is the
+        // short-form C <- (I - K H) C having gone wrong.
+        ACTS_DEBUG("  Post-update  : tr(C) "
+                   << trackStateProxy.predictedCovariance().trace() << " -> "
+                   << covFilt.trace() << ", cond = "
+                   << (minF > 0. ? maxF / minF
+                                 : std::numeric_limits<double>::infinity())
+                   << ", min_eigen = " << minF
+                   << ", chi2_inc = " << trackStateProxy.chi2());
+        if (minF <= 0.) {
+          ++alertNotPD;
+          ACTS_DEBUG("  [FATAL] Non-PD covariance after update: smallest "
+                     "eigenvalue " << minF);
+        }
+        if (covFilt.trace() > trackStateProxy.predictedCovariance().trace()) {
+          ACTS_DEBUG("  [WARN] tr(C) grew across the update -- an update "
+                     "cannot add information");
+        }
+      }
+
       lastMeasurementIndex = trackStateProxy.index();
       ++measurementStates;
     } else {
@@ -195,6 +492,53 @@ Result<typename track_container_t::TrackProxy> dafReferenceFilter(
     previousFilteredCovariance = trackStateProxy.filteredCovariance();
     previousReference = ref.parameters;
     hasPrevious = true;
+    ++stepIndex;
+  }
+
+  ACTS_DEBUG("Reference filter: " << reference.size() << " step(s), "
+             << measurementStates
+             << " measurement(s); largest deviation the linear model "
+                "transported, EXCLUDING the unmeasured along-wire coordinate: "
+                "max |dx| = "
+             << worstDeviation << " at step " << worstDeviationIndex
+             << "  (max |dx_loc1| = " << worstAlongWire << " separately)");
+  if (traceSteps) {
+    const double detProduct = std::exp(logDetProduct);
+    ACTS_DEBUG("Symplectic check: product of det(F) over "
+               << reference.size() << " step(s) = " << detProduct
+               << " (telescopes to the frame ratio between the track's "
+                  "endpoints; per-step values are NOT invariants)");
+    // Wide on purpose. The bound is what a genuinely non-symplectic stepper
+    // would blow through -- a random walk with the per-step spread seen here
+    // reaches [0.39, 2.5] over one track, so anything inside this range is
+    // indistinguishable from correct transport plus frame changes.
+    if (!(detProduct > 0.5 && detProduct < 2.0)) {
+      ACTS_DEBUG("  [WARN] Non-symplectic transport: the product should "
+                 "telescope to O(1); per-step frame ratios cannot accumulate "
+                 "this far, so suspect the stepper or the bound<->free "
+                 "Jacobians");
+    }
+    if (nonPositiveDet != 0) {
+      ACTS_DEBUG("  [FATAL] " << nonPositiveDet
+                 << " Jacobian(s) with det(F) <= 0 -- transport cannot "
+                    "reverse orientation");
+    }
+  }
+  if (warnDrift || warnChi2 || alertZeroNoise || alertNotPD) {
+    ACTS_DEBUG("Reference filter flags: " << warnDrift
+               << " x [WARN] linearization drift, " << warnChi2
+               << " x [WARN] high chi2, " << alertZeroNoise
+               << " x [ALERT] zero material noise, " << alertNotPD
+               << " x [FATAL] non-PD covariance");
+  }
+  if (haveEigenvalues) {
+    ACTS_DEBUG("Reference filter conditioning: worst |C-C^T| = "
+               << worstAsymmetry << " at step " << worstAsymmetryIndex
+               << "; smallest eigenvalue = " << smallestEigenvalue
+               << " at step " << smallestEigenvalueIndex
+               << "; worst finite cond(C) = " << worstCondition << " at step "
+               << worstConditionIndex << "; non-positive-definite covariances: "
+               << indefiniteCount);
   }
 
   if (measurementStates == 0) {

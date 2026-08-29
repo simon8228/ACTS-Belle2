@@ -649,15 +649,32 @@ def addMyDafFitter(
     outputCandidatesDir: str = "",
     outputWeightTrace: bool = False,
     weightTraceEvents: Optional[List[int]] = None,
+    outputLinearizationTrace: bool = False,
     protoTrackCandidatesOnly: bool = False,
     strawInitialWeightRadiusFactor: float = 0.0,
     useMomentMatchedCombiner: bool = False,
     reseedCovarianceScaling: float = 1.0,
     chiSquareDenominator: str = "full",
     annealingCutOffPerCandidate: bool = False,
+    weightConvergenceTolerance: float = 0.0,
+    minAnnealingIterations: int = 1,
+    pValueConvergenceTolerance: float = 0.0,
+    pValueMinimum: float = 0.0,
+    pValueMinIterations: int = 5,
+    reseedResetOffDiagonals: bool = False,
+    reseedVarianceCeiling: float = 0.0,
+    reseedAngleVarianceCeiling: float = 0.0,
+    useTwoFilterSmoothing: bool = False,
+    twoFilterBlowUpFactor: float = 1000.0,
+    referencePiecewise: bool = False,
+    referenceAnchorSmoothed: bool = False,
+    referencePiecewiseSelfCheck: bool = False,
     referenceLinearization: bool = False,
     referenceWeightCalibration: bool = True,
     referenceStartCovarianceScaling: float = 1.0,
+    referenceStartResetOffDiagonals: bool = True,
+    referenceStartVarianceCeiling: float = 1.0e6,
+    referenceStartAngleVarianceCeiling: float = 0.01,
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
     collection names and "tracks" whiteboard alias), but fits with the Deterministic
@@ -697,6 +714,17 @@ def addMyDafFitter(
     handful of events being visualised rather than a production run. Pass
     `weightTraceEvents=[3, 17, 42]` to write it for those event numbers only,
     which keeps a full production fit and its per-pass plots in a single run.
+
+    `outputLinearizationTrace` (also requires `outputCandidatesDir`, and honours
+    `weightTraceEvents`) writes per-event `daf-linearization-trace.csv`: one row per
+    surface per pass holding the predicted state that pass expanded the filter about,
+    the pass's smoothed state there, the 5x5 transport Jacobian into the surface, and
+    the surface's measurement axis at the crossing. It measures how far a plain
+    running-state EKF's expansion point wanders between annealing passes -- the thing
+    a fixed reference track (GenFit's KalmanFitterRefTrack) holds still -- and is read
+    by SVD_CDC_tracking/linearization/analyze_linearization.py. Independent of
+    `outputWeightTrace`; ~47 numbers per row against the weight trace's 10, so name
+    the events rather than tracing a run.
 
     `chiSquareDenominator` picks the covariance the per-candidate weight chi2
     divides its residual by, which is how decisively the DAF resolves a wire's
@@ -744,6 +772,7 @@ def addMyDafFitter(
         outputCandidatesDir=outputCandidatesDir,
         outputWeightTrace=outputWeightTrace,
         weightTraceEvents=weightTraceEvents or [],
+        outputLinearizationTrace=outputLinearizationTrace,
         protoTrackCandidatesOnly=protoTrackCandidatesOnly,
         fit=acts.examples.makeDafFitterFunction(
             trackingGeometry,
@@ -762,9 +791,25 @@ def addMyDafFitter(
             reseedCovarianceScaling=reseedCovarianceScaling,
             chiSquareDenominator=chiSquareDenominator,
             annealingCutOffPerCandidate=annealingCutOffPerCandidate,
+            weightConvergenceTolerance=weightConvergenceTolerance,
+            minAnnealingIterations=minAnnealingIterations,
+            pValueConvergenceTolerance=pValueConvergenceTolerance,
+            pValueMinimum=pValueMinimum,
+            pValueMinIterations=pValueMinIterations,
+            reseedResetOffDiagonals=reseedResetOffDiagonals,
+            reseedVarianceCeiling=reseedVarianceCeiling,
+            reseedAngleVarianceCeiling=reseedAngleVarianceCeiling,
+            useTwoFilterSmoothing=useTwoFilterSmoothing,
+            twoFilterBlowUpFactor=twoFilterBlowUpFactor,
+            referencePiecewise=referencePiecewise,
+            referenceAnchorSmoothed=referenceAnchorSmoothed,
+            referencePiecewiseSelfCheck=referencePiecewiseSelfCheck,
             referenceLinearization=referenceLinearization,
             referenceWeightCalibration=referenceWeightCalibration,
             referenceStartCovarianceScaling=referenceStartCovarianceScaling,
+            referenceStartResetOffDiagonals=referenceStartResetOffDiagonals,
+            referenceStartVarianceCeiling=referenceStartVarianceCeiling,
+            referenceStartAngleVarianceCeiling=referenceStartAngleVarianceCeiling,
             level=customLogLevel(),
         ),
         calibrator=calibrator,

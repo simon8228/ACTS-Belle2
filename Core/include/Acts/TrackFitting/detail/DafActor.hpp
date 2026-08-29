@@ -16,6 +16,7 @@
 #include "Acts/EventData/detail/CorrectedTransformationFreeToBound.hpp"
 #include "Acts/Geometry/GeometryContext.hpp"
 #include "Acts/Propagator/StandardAborters.hpp"
+#include "Acts/Material/ISurfaceMaterial.hpp"
 #include "Acts/Propagator/detail/PointwiseMaterialInteraction.hpp"
 #include "Acts/Surfaces/LineBounds.hpp"
 #include "Acts/Surfaces/Surface.hpp"
@@ -89,6 +90,19 @@ struct DafFitterResult {
   /// noise. See DafReferenceState.
   BoundVector lastReferenceParameters = BoundVector::Zero();
   bool hasLastReference = false;
+
+  /// Material crossed since the last recorded reference surface, accumulated
+  /// EXACTLY as the process noise is: reset wherever state.stepping.cov is
+  /// reset, so it pairs with the Q of the same segment. Pairing material
+  /// recorded AT a surface with that surface's own Q would compare mismatched
+  /// things -- a surface's post-update material lands in the NEXT segment's Q,
+  /// which is what makes "hasMaterial but Q == 0" look like a bug when it is
+  /// not.
+  double segmentThicknessInX0 = 0.;
+  double segmentELoss = 0.;
+  double segmentVariancePhi = 0.;
+  double segmentVarianceTheta = 0.;
+  double segmentVarianceQoverP = 0.;
 };
 
 namespace detail {
@@ -109,9 +123,16 @@ class DafActor {
   /// The target surface aborter
   SurfaceReached targetReached{std::numeric_limits<double>::lowest()};
 
-  /// Allows retrieving the competing candidate source links for a surface
-  std::unordered_map<const Surface*, DafMeasurementGroup>
-      inputMeasurementGroups;
+  /// Allows retrieving the competing candidate source links for a surface.
+  ///
+  /// NON-OWNING, and deliberately so. Propagator::makeState copies the whole
+  /// actor list into the propagator state, so a by-value map here is deep-
+  /// copied -- every group, every SourceLink -- on EVERY propagation. That is
+  /// tolerable at one propagation per pass and is not at ~110, which is what
+  /// the piecewise reference recording does. The map lives in fit_impl for the
+  /// whole fit, so it comfortably outlives any propagation that reads it.
+  const std::unordered_map<const Surface*, DafMeasurementGroup>*
+      inputMeasurementGroups = nullptr;
 
   /// Non-owning pointer to the outer driver's persistent per-candidate
   /// annealing state, keyed the same way as inputMeasurementGroups. Read-only
@@ -278,7 +299,9 @@ class DafActor {
           << " p=" << p << " pT=" << pT
           << " charge=" << stepper.charge(state.stepping)
           << " processedStates=" << result.processedStates << "/"
-          << inputMeasurementGroups.size()
+          << (inputMeasurementGroups != nullptr
+                  ? inputMeasurementGroups->size()
+                  : 0u)
           << " measurementStates=" << result.measurementStates
           << " currentSurface="
           << (surface != nullptr ? surface->geometryId().value() : 0)
@@ -289,7 +312,8 @@ class DafActor {
     }
 
     const bool isTrackComplete =
-        result.measurementStates == inputMeasurementGroups.size();
+        inputMeasurementGroups != nullptr &&
+        result.measurementStates == inputMeasurementGroups->size();
     const bool isEndOfWorldReached =
         endOfWorldReached.checkAbort(state, stepper, navigator, logger());
     const bool isVolumeConstraintReached = volumeConstraintAborter.checkAbort(
@@ -344,8 +368,11 @@ class DafActor {
     const bool surfaceIsSensitive = surface.isSensitive();
     const bool surfaceHasMaterial = surface.surfaceMaterial() != nullptr;
 
-    const auto groupIt = inputMeasurementGroups.find(&surface);
-    if (groupIt != inputMeasurementGroups.end()) {
+    if (inputMeasurementGroups == nullptr) {
+      return Result<void>::success();
+    }
+    const auto groupIt = inputMeasurementGroups->find(&surface);
+    if (groupIt != inputMeasurementGroups->end()) {
       const DafMeasurementGroup& group = groupIt->second;
       ACTS_VERBOSE("Measurement surface " << surface.geometryId()
                                           << " detected with "
@@ -354,12 +381,14 @@ class DafActor {
       stepper.transportCovarianceToBound(state.stepping, surface,
                                          freeToBoundCorrection);
 
-      Acts::detail::performMaterialInteraction(
+      accumulateMaterial(
+          Acts::detail::performMaterialInteraction(
           state, stepper, surface,
           Acts::detail::determineMaterialUpdateMode(
               state, navigator, MaterialUpdateMode::PreUpdate),
           NoiseUpdateMode::addNoise, multipleScattering, energyLoss,
-          logger());
+          logger()),
+          surface, stepper.position(state.stepping), result);
 
       TrackStatePropMask mask =
           TrackStatePropMask::Predicted | TrackStatePropMask::Filtered |
@@ -501,12 +530,14 @@ class DafActor {
         ++result.processedStates;
         result.measurementHoles = result.missedActiveSurfaces.size();
 
-        Acts::detail::performMaterialInteraction(
+        accumulateMaterial(
+            Acts::detail::performMaterialInteraction(
             state, stepper, surface,
             Acts::detail::determineMaterialUpdateMode(
                 state, navigator, MaterialUpdateMode::PostUpdate),
             NoiseUpdateMode::addNoise, multipleScattering, energyLoss,
-            logger());
+            logger()),
+            surface, stepper.position(state.stepping), result);
         return Result<void>::success();
       }
 
@@ -607,12 +638,14 @@ class DafActor {
                      trackStateProxy.filteredCovariance(), surface);
       ++result.measurementStates;
 
-      Acts::detail::performMaterialInteraction(
+      accumulateMaterial(
+          Acts::detail::performMaterialInteraction(
           state, stepper, surface,
           Acts::detail::determineMaterialUpdateMode(
               state, navigator, MaterialUpdateMode::PostUpdate),
           NoiseUpdateMode::addNoise, multipleScattering, energyLoss,
-          logger());
+          logger()),
+          surface, stepper.position(state.stepping), result);
       ++result.processedStates;
       result.measurementHoles = result.missedActiveSurfaces.size();
       result.lastMeasurementIndex = result.lastTrackIndex;
@@ -678,12 +711,14 @@ class DafActor {
 
       ++result.processedStates;
 
-      Acts::detail::performMaterialInteraction(
+      accumulateMaterial(
+          Acts::detail::performMaterialInteraction(
           state, stepper, surface,
           Acts::detail::determineMaterialUpdateMode(
               state, navigator, MaterialUpdateMode::FullUpdate),
           NoiseUpdateMode::addNoise, multipleScattering, energyLoss,
-          logger());
+          logger()),
+          surface, stepper.position(state.stepping), result);
     }
 
     return Result<void>::success();
@@ -704,6 +739,26 @@ class DafActor {
   /// @param hasMaterial Whether the surface has material
   /// @param isHole Whether the surface is a hole
   /// @param candidates The surface's calibrated candidates, or nullptr
+  /// Fold one material interaction into the current segment's running totals.
+  ///
+  /// x/X0 is taken from the surface's own slab rather than inferred from the
+  /// returned variances, because that is exactly what separates "the material
+  /// map carries no thickness here" from "a real slab produced no noise" --
+  /// a distinction the variances alone cannot make.
+  void accumulateMaterial(const Acts::detail::PointwiseMaterialEffects& effects,
+                          const Surface& surface, const Vector3& position,
+                          result_type& result) const {
+    result.segmentELoss += effects.eLoss;
+    result.segmentVariancePhi += effects.variancePhi;
+    result.segmentVarianceTheta += effects.varianceTheta;
+    result.segmentVarianceQoverP += effects.varianceQoverP;
+    const auto* material = surface.surfaceMaterial();
+    if (material != nullptr) {
+      result.segmentThicknessInX0 +=
+          material->materialSlab(position).thicknessInX0();
+    }
+  }
+
   void recordReferenceState(
       const Surface& surface, const BoundVector& parameters,
       const BoundMatrix& jacobian, double pathLength,
@@ -748,6 +803,18 @@ class DafActor {
     // segments it came out negative and was clamped to zero -- leaving those
     // segments with no material noise at all.
     record.noise = covAtSurface;
+
+    // Same segment as `noise`, so the two are directly comparable -- then
+    // reset, exactly as the caller resets state.stepping.cov straight after.
+    record.thicknessInX0 = result.segmentThicknessInX0;
+    record.energyLoss = result.segmentELoss;
+    record.varianceTheta = result.segmentVarianceTheta;
+    record.varianceQoverP = result.segmentVarianceQoverP;
+    result.segmentThicknessInX0 = 0.;
+    result.segmentELoss = 0.;
+    result.segmentVariancePhi = 0.;
+    result.segmentVarianceTheta = 0.;
+    result.segmentVarianceQoverP = 0.;
 
     if (candidates != nullptr) {
       record.candidateIndices.reserve(candidates->size());

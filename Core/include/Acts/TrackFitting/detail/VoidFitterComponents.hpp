@@ -75,6 +75,18 @@ double voidDafChiSquareCalculator(
 }
 
 template <typename traj_t>
+double voidDafLogNormalization(
+    typename traj_t::ConstTrackStateProxy /*candidate*/) {
+  // Unlike the other void components this one is REACHED, on every DAF that
+  // leaves the normalisation off: DafFitterExtensions connects it by default
+  // and the fitter only calls it when useCandidateNormalization is set. It
+  // returns the neutral log(1) rather than throwing, so that a caller which
+  // enables the flag without connecting a real calculator degrades to the
+  // norm-free weights instead of aborting the fit.
+  return 0.;
+}
+
+template <typename traj_t>
 void voidDafWeightedCombiner(
     const std::vector<typename traj_t::ConstTrackStateProxy>& /*candidates*/,
     const std::vector<double>& /*weights*/,

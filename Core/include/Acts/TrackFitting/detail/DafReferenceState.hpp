@@ -84,6 +84,19 @@ struct DafReferenceState {
   /// measurement precedes it).
   bool isHole = false;
 
+  /// Material crossed over the segment ENDING at this surface -- the same
+  /// segment @c noise covers, so the two can be compared directly. That
+  /// pairing is the point: a surface flagged @c hasMaterial whose own Q is
+  /// zero is NORMAL (its material lands in the next segment), whereas
+  /// thicknessInX0 > 0 with a zero Q over the SAME segment is a real defect.
+  double thicknessInX0 = 0.;
+  /// Mean energy loss over that same segment.
+  double energyLoss = 0.;
+  /// The multiple-scattering and straggling parts of that segment's noise,
+  /// as the material model produced them rather than as read back off Q.
+  double varianceTheta = 0.;
+  double varianceQoverP = 0.;
+
   /// Indices, into the persistent candidate store, of this surface's
   /// calibrated candidate track states -- in the same order as the surface's
   /// DafMeasurementGroup and therefore as its weights. Empty unless

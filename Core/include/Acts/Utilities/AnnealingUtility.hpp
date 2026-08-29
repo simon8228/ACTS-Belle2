@@ -104,6 +104,35 @@ class AnnealingUtility {
   /// @return Calculated weight
   double getWeight(State& state, double chi2) const;
 
+  /// @brief Weights for a whole group of competing candidates, in one call.
+  ///
+  /// Equivalent to calling getWeight(state, allChi2[j], allChi2) for every j
+  /// when @p logNorms is null -- same denominator, computed once instead of N
+  /// times -- and the ONLY form that can reproduce GenFit's weights when it is
+  /// not.
+  ///
+  /// GenFit multiplies every term, candidates and cut-off alike, by that
+  /// candidate's own Gaussian prefactor norm_k = 1/sqrt((2*pi)^d * det S_k)
+  /// (DAF.cc:313-321):
+  ///
+  ///   w_j = norm_j*exp(-chi2_j/2T)
+  ///         / ( sum_k norm_k*exp(-chi2_k/2T) + sum_k norm_k*exp(-cutOff/2T) )
+  ///
+  /// Those prefactors cancel only when every candidate shares one S. GenFit's
+  /// own comment flags that they need not ("the following assumes that in the
+  /// competing hits could have different V"), and for CDC mirror pairs they do
+  /// not: left and right get separately evaluated drift resolutions.
+  ///
+  /// @param state The annealing state, carrying the current temperature
+  /// @param allChi2 chi2 of every candidate on this surface
+  /// @param logNorms log(norm_k) per candidate, in the same order, or nullptr
+  /// for the norm-free form. Must be the same length as @p allChi2.
+  ///
+  /// @return One weight per candidate, in the order of @p allChi2
+  std::vector<double> getWeights(
+      State& state, const std::vector<double>& allChi2,
+      const std::vector<double>* logNorms = nullptr) const;
+
  private:
   /// Configuration object
   Config m_cfg;

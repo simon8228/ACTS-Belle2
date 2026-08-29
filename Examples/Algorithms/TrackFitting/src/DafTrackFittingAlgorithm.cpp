@@ -133,22 +133,47 @@ ProcessCode DafTrackFittingAlgorithm::execute(
   // sequencer, since every event writes its own file.
   std::ofstream candidatesCsv;
   std::ofstream traceCsv;
+  std::ofstream linCsv;
   if (!m_cfg.outputCandidatesDir.empty()) {
     candidatesCsv.open(perEventFilepath(
         m_cfg.outputCandidatesDir, "daf-candidates.csv", ctx.eventNumber));
     candidatesCsv
         << "proto_track_id,track_id,geometry_id,measurement_id,weight,chi2,won\n";
+    // Both traces read the same per-pass history and are selected by the same
+    // event list; only which file gets written differs.
     const bool traceThisEvent =
-        m_cfg.outputWeightTrace &&
         (m_cfg.weightTraceEvents.empty() ||
          std::find(m_cfg.weightTraceEvents.begin(),
                    m_cfg.weightTraceEvents.end(),
                    ctx.eventNumber) != m_cfg.weightTraceEvents.end());
-    if (traceThisEvent) {
+    if (m_cfg.outputWeightTrace && traceThisEvent) {
       traceCsv.open(perEventFilepath(
           m_cfg.outputCandidatesDir, "daf-weight-trace.csv", ctx.eventNumber));
       traceCsv << "proto_track_id,track_id,iteration,temperature,is_final,"
                   "geometry_id,measurement_id,weight,chi2,track_loc0\n";
+    }
+    if (m_cfg.outputLinearizationTrace && traceThisEvent) {
+      linCsv.open(perEventFilepath(m_cfg.outputCandidatesDir,
+                                   "daf-linearization-trace.csv",
+                                   ctx.eventNumber));
+      linCsv << "proto_track_id,track_id,iteration,temperature,is_final,"
+                "geometry_id,n_candidates";
+      // Predicted (the pass's expansion point) and smoothed bound parameters.
+      for (const char* which : {"pred", "smt"}) {
+        for (const char* par : {"loc0", "loc1", "phi", "theta", "qop"}) {
+          linCsv << ',' << which << '_' << par;
+        }
+      }
+      linCsv << ",gx,gy,gz,mx,my,mz";
+      // The 5x5 bound block of the transport Jacobian into this surface, row
+      // major. Time is dropped: it is not fitted here and its row/column
+      // would only add a constant to every matrix norm.
+      for (int i = 0; i < 5; ++i) {
+        for (int j = 0; j < 5; ++j) {
+          linCsv << ",j" << i << j;
+        }
+      }
+      linCsv << '\n';
     }
   }
 
@@ -278,7 +303,7 @@ ProcessCode DafTrackFittingAlgorithm::execute(
     auto result = (*m_cfg.fit)(
         measurementGroups, orderedSurfaces, initialParams, options, calibrator,
         tracks, candidatesCsv.is_open() ? &finalCandidateState : nullptr,
-        traceCsv.is_open() ? &candidateTrace : nullptr);
+        (traceCsv.is_open() || linCsv.is_open()) ? &candidateTrace : nullptr);
 
     if (result.ok()) {
       auto& track = result.value();
@@ -329,6 +354,53 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                        << ',' << candState.chi2[i] << ','
                        << candState.trackLoc0 << '\n';
             }
+          }
+        }
+      }
+      if (linCsv.is_open()) {
+        // One row per SURFACE per pass, not per candidate: the linearisation
+        // point is a property of the track's crossing, and every candidate on
+        // a surface shares it. Surfaces are walked in proto-track order, so
+        // grouping by (track, geometry_id) gives the history in pass order.
+        for (const auto& entry : candidateTrace) {
+          for (const Acts::Surface* surface : orderedSurfaces) {
+            auto stateIt = entry.state.find(surface);
+            if (stateIt == entry.state.end()) {
+              continue;
+            }
+            const auto& candState = stateIt->second;
+            // A surface the pass never turned into a calibrated track state
+            // has no expansion point to report. Skipping it here is what
+            // keeps a missing row distinguishable from a zero one.
+            if (!candState.hasLinearization) {
+              continue;
+            }
+            linCsv << itrack << ',' << track.index() << ',' << entry.iteration
+                   << ',' << entry.temperature << ','
+                   << (entry.isFinal ? 1 : 0) << ','
+                   << surface->geometryId().value() << ','
+                   << candState.candidates.size();
+            for (const Acts::BoundVector* pars :
+                 {&candState.predictedParameters,
+                  &candState.smoothedParameters}) {
+              for (const Acts::BoundIndices p :
+                   {Acts::eBoundLoc0, Acts::eBoundLoc1, Acts::eBoundPhi,
+                    Acts::eBoundTheta, Acts::eBoundQOverP}) {
+                linCsv << ',' << (*pars)[p];
+              }
+            }
+            for (int k = 0; k < 3; ++k) {
+              linCsv << ',' << candState.globalPosition[k];
+            }
+            for (int k = 0; k < 3; ++k) {
+              linCsv << ',' << candState.measurementAxis[k];
+            }
+            for (int i = 0; i < 5; ++i) {
+              for (int j = 0; j < 5; ++j) {
+                linCsv << ',' << candState.jacobian(i, j);
+              }
+            }
+            linCsv << '\n';
           }
         }
       }

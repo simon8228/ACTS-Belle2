@@ -104,6 +104,20 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     bool referenceLinearization = false,
     bool referenceWeightCalibration = true,
     double referenceStartCovarianceScaling = 1.,
+    bool referenceStartResetOffDiagonals = true,
+    double referenceStartVarianceCeiling = 1.e6,
+    double referenceStartAngleVarianceCeiling = 0.01,
+    double weightConvergenceTolerance = 0.,
+    std::size_t minAnnealingIterations = 1,
+    double pValueConvergenceTolerance = 0., double pValueMinimum = 0.,
+    std::size_t pValueMinIterations = 5,
+    bool reseedResetOffDiagonals = false,
+    double reseedVarianceCeiling = 0.,
+    double reseedAngleVarianceCeiling = 0.,
+    bool useTwoFilterSmoothing = false,
+    double twoFilterBlowUpFactor = 1000.,
+    bool referencePiecewise = false, bool referenceAnchorSmoothed = false,
+    bool referencePiecewiseSelfCheck = false,
     const Acts::Logger& logger = *Acts::getDefaultLogger(
         "Daf", Acts::Logging::INFO));
 

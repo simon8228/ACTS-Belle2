@@ -8,6 +8,10 @@
 
 #pragma once
 
+#include "Acts/Definitions/TrackParametrization.hpp"
+
+#include <array>
+
 #include "Acts/EventData/SourceLink.hpp"
 #include "Acts/Geometry/GeometryContext.hpp"
 #include "Acts/MagneticField/MagneticFieldContext.hpp"
@@ -58,6 +62,11 @@ struct DafFitterExtensions {
   /// (shared) predicted state, before the candidates are combined.
   using ChiSquareCalculator = Delegate<double(ConstTrackStateProxy)>;
 
+  /// Log of the Gaussian prefactor 1/sqrt((2*pi)^d * det S) that belongs with
+  /// the same candidate's chi2, for GenFit-equivalent weights. Must be
+  /// connected with the SAME DafChiSquareDenominator as the chi2 calculator.
+  using LogNormalization = Delegate<double(ConstTrackStateProxy)>;
+
   /// Combines N calibrated candidates and their annealed weights into a
   /// single effective measurement written into the real track state.
   using WeightedCombiner =
@@ -79,6 +88,10 @@ struct DafFitterExtensions {
   /// only ever be silently ignored.
   ChiSquareCalculator chiSquareCalculator;
 
+  /// Per-candidate Gaussian normalisation, only consulted when
+  /// DafFitterOptions::useCandidateNormalization is set.
+  LogNormalization logNormalization;
+
   /// Combines calibrated, weighted candidates into the effective measurement
   WeightedCombiner weightedCombiner;
 
@@ -94,6 +107,8 @@ struct DafFitterExtensions {
     calibrator.template connect<&detail::voidFitterCalibrator<traj_t>>();
     chiSquareCalculator
         .template connect<&detail::voidDafChiSquareCalculator<traj_t>>();
+    logNormalization
+        .template connect<&detail::voidDafLogNormalization<traj_t>>();
     weightedCombiner
         .template connect<&detail::voidDafWeightedCombiner<traj_t>>();
     updater.template connect<&detail::voidFitterUpdater<traj_t>>();
@@ -119,11 +134,64 @@ struct DafCandidateState {
   /// DafCandidateTrace entry, where it makes the evolving track visible next
   /// to the evolving weights.
   double trackLoc0 = std::numeric_limits<double>::quiet_NaN();
+
+  /// Where this pass linearised the fit on this surface, and with what
+  /// transport. Filled only while a DafCandidateTrace is being recorded --
+  /// see DafFitterOptions::candidateTrace -- because it is only ever read
+  /// per-pass, and a fit that is not tracing has nothing to compare against.
+  /// @c hasLinearization says whether the rest of this block means anything.
+  ///
+  /// This is the raw material for asking how much a plain (running-state)
+  /// EKF's expansion point moves between annealing passes, which is exactly
+  /// what a reference track would hold still. A pass whose predicted state,
+  /// transport Jacobian and measurement frame barely move from the previous
+  /// one had nothing to gain from a fixed reference; one where they move by
+  /// more than the measurement resolution did.
+  bool hasLinearization = false;
+  /// Predicted (pre-update) bound parameters on this surface, i.e. the
+  /// expansion point the filter actually linearised the update about.
+  BoundVector predictedParameters = BoundVector::Zero();
+  /// Smoothed (post-update, whole-track) bound parameters on this surface.
+  /// The last pass's value of this is the best available stand-in for the
+  /// converged trajectory that a reference track would be built from.
+  BoundVector smoothedParameters = BoundVector::Zero();
+  /// Bound-to-bound transport Jacobian from the previous track state to this
+  /// one -- F_{m-1} in the linearised filter. Identity on the first state of
+  /// a pass, where there is no previous state to transport from.
+  BoundMatrix jacobian = BoundMatrix::Identity();
+  /// Global position of the smoothed crossing point on this surface.
+  Vector3 globalPosition = Vector3::Zero();
+  /// First column of the surface's measurement (reference) frame at that
+  /// crossing -- the direction loc0 is measured along, i.e. the direction the
+  /// projector H picks out. For a straw this is the wire-to-track direction,
+  /// which rotates with the track's momentum direction and so is *not* fixed
+  /// by the geometry alone; that rotation is the third linearisation
+  /// instability a reference track removes.
+  Vector3 measurementAxis = Vector3::Zero();
 };
 
 /// Per-surface map of persistent annealing state, keyed the same way as the
 /// input measurement groups.
 using DafCandidateMap = std::unordered_map<const Surface*, DafCandidateState>;
+
+/// What one weight-update pass observed, for the convergence tests.
+struct DafPassSummary {
+  /// Largest absolute weight change over every candidate on every surface --
+  /// GenFit's maxAbsChange in DAF::calcWeights, its primary convergence
+  /// measure.
+  double maxAbsWeightChange = 0.;
+  /// Weight-averaged chi2 summed over every surface, evaluated against the
+  /// SMOOTHED state. The closest thing ACTS has to GenFit's backward chi2:
+  /// both score the measurements against a state that has seen the whole
+  /// track, so both are biased low against an independent estimate, but they
+  /// are not the same accumulation and the p-values built from them are not
+  /// numerically identical. See DafFitterOptions::pValueConvergenceTolerance.
+  double weightedChi2 = 0.;
+  /// Measurement dimensions summed over the surfaces, minus the five track
+  /// parameters. Zero or negative means the track is not over-constrained and
+  /// no p-value can be formed.
+  double ndf = 0.;
+};
 
 /// One annealing pass's worth of candidate state, for tracing how the weights
 /// evolve as the temperature falls.
@@ -247,6 +315,145 @@ struct DafFitterOptions {
   /// back to the biased state whenever the result is not positive definite.
   bool useUnbiasedSmoothedState = false;
 
+  /// Weight every candidate by its own Gaussian prefactor
+  /// norm = 1/sqrt((2*pi)^d * det S), as GenFit does (DAF.cc:313).
+  ///
+  /// ON by default (changed 2026-08-28), because it is what GenFit does and it
+  /// costs nothing where it does not apply: it is an exact NO-OP wherever the
+  /// competing candidates on a surface share one S, which is the case for any
+  /// detector whose candidates are the same measurement type with the same
+  /// covariance. There nu divides out of numerator and denominator identically.
+  ///
+  /// It matters for CDC drift circles, where the left and right mirror
+  /// hypotheses carry separately evaluated resolutions. Verified in the ACTS
+  /// input rather than assumed: of 292 straws in one event, var_local0 differs
+  /// between the two mirrors on 290, by a median 3.7% and up to 144% -- so the
+  /// per-side resolutions basf2 derives from (z, alpha, theta) are already
+  /// present in the measurement file. Over 64948 pairs the resulting weight
+  /// tilt sqrt(S_b/S_a) is a median 1.5%, exceeds 5% on 20% of pairs and 25%
+  /// on 2.7%.
+  ///
+  /// GenFit's own comment says why it cannot be skipped: "the following assumes
+  /// that in the competing hits could have different V" (DAF.cc:313, where the
+  /// same norm scales the cut-off term too).
+  ///
+  /// Requires DafFitterExtensions::logNormalization to be connected with the
+  /// same denominator as the chi2 calculator; with the void one it degrades to
+  /// the norm-free weights rather than failing.
+  bool useCandidateNormalization = true;
+
+  /// Stop annealing early once no candidate weight moves by more than this
+  /// between consecutive passes; 0 (the default) runs the whole schedule.
+  ///
+  /// GenFit's deltaWeight_, 0.001 in basf2's payload: DAF::calcWeights returns
+  /// whether every weight changed by less than it, and
+  /// DAF::processTrackWithRep then does ONE further pass with the converged
+  /// weights and stops. A track whose weights settle at pass 5 costs 6 passes
+  /// there and 9 here.
+  ///
+  /// Not purely a CPU knob: every pass re-seeds the next from its smoothed
+  /// first-measurement state, so passes beyond convergence keep moving the
+  /// linearisation point without any weight change to justify it.
+  double weightConvergenceTolerance = 0.;
+
+  /// Passes that must run before either convergence test may stop the fit.
+  /// GenFit's minIterations_, 5 in basf2's payload. Without it a fit whose
+  /// weights happen not to move on pass 1 -- every surface with a single
+  /// candidate, say -- would stop while still hot.
+  std::size_t minIterations = 1;
+
+  /// GenFit's SECONDARY convergence test: accept a pass whose weights are still
+  /// moving, provided the fit p-value is valid and has settled. 0 (the default)
+  /// disables it.
+  ///
+  /// The test is a fallback, evaluated only when the weight test above has
+  /// failed, and is four conditions ANDed (DAF.cc:153-155):
+  ///
+  ///   pass >= pValueMinIterations && p > pValueMinimum
+  ///     && lastP >= pValueMinimum && |lastP - p| < this
+  ///
+  /// basf2's payload sets deltaPValue = 1, which with p in [0, 1] makes the
+  /// STABILITY half vacuous and leaves the VALIDITY half doing the work: `p >
+  /// pValueMinimum` is a strict inequality, so a fit whose p-value underflows
+  /// to exactly zero is excluded and keeps annealing. Reproducing GenFit
+  /// therefore means setting this to 1, not to something small -- a small value
+  /// is a genuinely different, stricter test.
+  ///
+  /// CAVEAT ON THE P-VALUE ITSELF. GenFit uses the BACKWARD pass's p-value.
+  /// ACTS has no backward chi2; the closest available quantity, and what this
+  /// uses, is DafPassSummary::weightedChi2, the weight-averaged chi2 against
+  /// the SMOOTHED state. Both are scored against a state that has seen the
+  /// whole track, so both are biased low, but they are not the same
+  /// accumulation and the two p-values are not numerically identical.
+  double pValueConvergenceTolerance = 0.;
+
+  /// The p-value a pass must strictly exceed for the test above to accept it.
+  /// GenFit's minPval_, 0 in basf2's payload -- which is not a no-op, because
+  /// the comparison is strict.
+  double pValueMinimum = 0.;
+
+  /// Passes that must run before the p-value test may fire. GenFit's
+  /// minIterForPval_, 5 in basf2's payload. Independent of minIterations.
+  std::size_t pValueMinIterations = 5;
+
+  /// Reset the off-diagonals of the re-seed covariance, as GenFit's
+  /// MeasuredStateOnPlane::blowUpCov does (resetOffDiagonals defaults true
+  /// there). Keeping them preserves correlations that came from the very
+  /// measurements the next pass is about to re-filter, which is part of what
+  /// the blow-up exists to discard. Measured to contribute nothing on its own.
+  bool reseedResetOffDiagonals = false;
+
+  /// Per-variance ceiling applied after scaling, GenFit's blowUpMaxVal (1e6
+  /// there). 0 disables it.
+  ///
+  /// This is what makes a large scaling safe, and why GenFit can use 1000 where
+  /// ACTS cannot. GenFit's plane state is (q/p, u', v', u, v) -- every
+  /// component unbounded, so a variance of 1e6 simply means "no information".
+  /// An ACTS bound state carries phi and theta, which are BOUNDED: once
+  /// sigma_theta approaches pi the prior is already flat, and past that it is
+  /// nonsense. At scaling 1000 sigma_theta reaches order 10 rad, the first
+  /// update throws the direction anywhere, normalizePhiTheta folds theta back
+  /// into [0, pi] and flips phi by pi on the way, and the pass restarts from a
+  /// state pointing somewhere arbitrary. Observed as a large efficiency loss.
+  ///
+  /// Ceilings are given per parameter so the unbounded components can take
+  /// GenFit's full blow-up while the angles stay inside the branch cut. See
+  /// reseedVarianceCeilings.
+  double reseedVarianceCeiling = 0.;
+
+  /// Per-parameter ceilings, indexed by BoundIndices, overriding the scalar
+  /// reseedVarianceCeiling where non-zero. The point of the split: loc0, loc1
+  /// and q/p are unbounded and can absorb the full 1000x, while eBoundPhi and
+  /// eBoundTheta must stay well inside their periodic range -- (0.1 rad)^2 is
+  /// already an almost flat direction prior and is nowhere near the wrap.
+  std::array<double, eBoundSize> reseedVarianceCeilings{};
+
+  /// Smooth by running a second Kalman filter BACKWARD and combining it with
+  /// the forward one, instead of the RTS gain-matrix smoother. GenFit's
+  /// arrangement (KalmanFitterRefTrack::processTrackWithRep: forward filter,
+  /// blow up the last point, backward filter) with GenFit's combination
+  /// (KalmanFitterInfo::getFittedState(biased=true)):
+  ///
+  ///   C_s = (C_f^-1 + C_b^-1)^-1
+  ///   x_s = C_s (C_f^-1 x_f + C_b^-1 x_b)
+  ///
+  /// where x_f is the forward FILTERED state and x_b the backward PREDICTED
+  /// one, so each measurement enters exactly once.
+  ///
+  /// Off by default. For a linear-Gaussian system this is algebraically the
+  /// same smoothed estimate the RTS smoother produces, so it is expected to
+  /// change nothing except through non-linearity -- and it is the less
+  /// numerically stable of the two, since it inverts covariances to combine.
+  /// Any failure (no reverse pass, a surface with no backward partner, a
+  /// non-invertible sum) falls back to the RTS smoother for that track.
+  bool useTwoFilterSmoothing = false;
+
+  /// Covariance blow-up applied to the backward filter's starting state, at
+  /// the last measurement. GenFit's blowUpFactor, 1e3. The ceilings above are
+  /// applied with it -- an ACTS bound state has periodic phi and theta, so an
+  /// unclipped blow-up here wraps them exactly as it does at the re-seed.
+  double twoFilterBlowUpFactor = 1000.;
+
   /// Propagation steps allowed without forward progress before a pass is
   /// abandoned as stalled. The guard exists for oscillating intersection
   /// searches, but a low-momentum curler legitimately takes many steps between
@@ -302,6 +509,50 @@ struct DafFitterOptions {
   /// state, so it can drift from the smoothed curve over a long track. Matching
   /// GenFit exactly would need one short propagation per segment.
   bool referenceLinearization = false;
+
+  /// Build the reference trajectory SEGMENT BY SEGMENT -- one short
+  /// propagation from each sequence surface to the next -- instead of
+  /// capturing one continuous propagation from the seed. No effect unless
+  /// referenceLinearization is set.
+  ///
+  /// GenFit's KalmanFitterRefTrack::prepareTrack works this way
+  /// (KalmanFitterRefTrack.cc:477-498: extrapolateToPlane from the previous
+  /// reference state to the next plane, then getForwardJacobianAndNoise per
+  /// segment). ACTS's single propagation is cheaper but drifts from the curve
+  /// the fit actually converged to over a long track, which is the reference
+  /// linearisation's whole reason to exist.
+  ///
+  /// On its own this should be a NO-OP: the segment boundaries fall exactly
+  /// where the continuous recording already divides the noise (surface m's
+  /// pre-update material into N_m, its post-update material into N_m+1), so
+  /// the two should produce the same trajectory. That equality is the
+  /// invariant referencePiecewiseSelfCheck verifies, and it is what catches
+  /// the failure mode this split can have: a propagation STARTING on surface m
+  /// skipping m's post-update material, losing noise at every boundary.
+  bool referencePiecewise = false;
+
+  /// Re-linearise each surface's reference around the PREVIOUS pass's smoothed
+  /// state at that surface, rather than around the transported seed. Requires
+  /// referencePiecewise.
+  ///
+  /// This is the other half of GenFit's arrangement: with setRefitAll() every
+  /// DAF iteration rebuilds the reference, and a point that has a smoothed
+  /// state re-linearises around it (KalmanFitterRefTrack.cc:531/588 --
+  /// constructPlane(*smoothedState), then extrapolate that state to the plane).
+  /// ACTS re-seeds only from the smoothed state at the FIRST measurement and
+  /// propagates onward, so surfaces far from it are linearised about a curve
+  /// the fit has already moved away from.
+  ///
+  /// The transport F_m and noise N_m still come from propagating the previous
+  /// reference to surface m; only the linearisation POINT at m is replaced.
+  /// The affine constant c_m = p_ref,m - F_m p_ref,m-1 absorbs the difference,
+  /// which is exactly what it is for.
+  bool referenceAnchorSmoothed = false;
+
+  /// Record both the piecewise and the continuous reference on the first pass
+  /// and report where they differ. Diagnostic only, and expensive -- it doubles
+  /// the recording work.
+  bool referencePiecewiseSelfCheck = false;
 
   /// Score the candidates for the weight update using the measurements the
   /// REFERENCE pass calibrated, rather than re-calibrating them against the
@@ -365,6 +616,30 @@ struct DafFitterOptions {
   /// prior cached for passes 2..N. Scaling only the former would leave the
   /// option with no effect on the passes that decide the fit.
   double referenceStartCovarianceScaling = 1.;
+
+  /// The reference path's equivalents of the reseed blow-up controls, applied
+  /// to whichever prior a pass filters against. Defaults are GenFit's, from
+  /// AbsKalmanFitter.h:57 -- `resetOffDiagonals_(true), blowUpMaxVal_(1.E6)`.
+  ///
+  /// They only do anything once referenceStartCovarianceScaling != 1, since a
+  /// prior that is not inflated has nothing to clip. Keeping them at GenFit's
+  /// values means turning the scaling up cannot silently produce the
+  /// uncapped blow-up that made blowUpFactor=1000 unusable on the
+  /// running-state path.
+  ///
+  /// NOTE ON UNITS: GenFit works in cm, ACTS in mm, so GenFit's 1e6 is 1e8 in
+  /// ACTS units for the two position variances. 1e6 is kept here because it is
+  /// still ~50x above the largest eigenvalue this fit ever reaches (1.8e4), so
+  /// it does not bind either way -- but it is NOT a literal translation.
+  bool referenceStartResetOffDiagonals = true;
+  double referenceStartVarianceCeiling = 1.e6;
+
+  /// Per-parameter ceilings, overriding referenceStartVarianceCeiling where
+  /// non-zero. phi and theta need their own and much tighter one: ACTS bound
+  /// parameters are periodic, so past sigma ~ pi a prior is not flat but
+  /// meaningless. GenFit needs no equivalent -- its (q/p, u', v', u, v) plane
+  /// state has no periodic component at all.
+  std::array<double, eBoundSize> referenceStartVarianceCeilings{};
 
   /// Drift-circle initial weighting on straw surfaces, as a multiple of the
   /// straw's radial cell spacing; 0 (the default) keeps the uniform 1/N start.

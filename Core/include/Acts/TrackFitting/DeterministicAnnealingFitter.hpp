@@ -24,6 +24,8 @@
 #include "Acts/Propagator/PropagatorOptions.hpp"
 #include "Acts/TrackFitting/DafFitterError.hpp"
 #include "Acts/TrackFitting/DafOptions.hpp"
+#include "Acts/TrackFitting/detail/Chi2SurvivalFunction.hpp"
+#include "Acts/Utilities/detail/periodic.hpp"
 #include "Acts/TrackFitting/detail/DafActor.hpp"
 #include "Acts/TrackFitting/detail/DafReferenceFilter.hpp"
 #include "Acts/TrackFitting/detail/DafReferenceState.hpp"
@@ -32,6 +34,7 @@
 #include "Acts/Utilities/HashedString.hpp"
 #include "Acts/Utilities/Logger.hpp"
 #include "Acts/Utilities/Result.hpp"
+#include "Acts/Utilities/UnitVectors.hpp"
 #include "Acts/Utilities/TrackHelpers.hpp"
 
 #include <algorithm>
@@ -154,6 +157,47 @@ class DeterministicAnnealingFitter {
   }
 
  private:
+  /// GenFit's MeasuredStateOnPlane::blowUpCov, in its own order: reset the
+  /// off-diagonals, scale, then clip every variance to a ceiling (its
+  /// blowUpMaxVal, 1e6).
+  ///
+  /// The clip is what makes a large scaling survivable, and why GenFit can use
+  /// 1000 where a uniform ACTS scaling cannot. GenFit's plane state
+  /// (q/p, u', v', u, v) is entirely unbounded, so a huge variance just means
+  /// "no information". An ACTS bound state carries phi and theta, which are
+  /// periodic: past sigma ~ pi the prior is not merely flat but meaningless,
+  /// the first update sends the direction anywhere, and normalizePhiTheta folds
+  /// it back with a phi flip. Ceilings are per parameter so loc0/loc1/qop can
+  /// take the full blow-up while the angles stay well inside the branch cut.
+  ///
+  /// Shared by the inter-pass re-seed and the backward filter's starting state
+  /// so the two cannot end up with different wrap protection.
+  /// @param ceiling Uniform variance ceiling, 0 to disable
+  /// @param ceilings Per-parameter ceilings, overriding @p ceiling where set
+  void blowUpCovariance(BoundSquareMatrix& cov, double scaling,
+                        bool resetOffDiagonals, double ceiling,
+                        const std::array<double, eBoundSize>& ceilings) const {
+    if (resetOffDiagonals) {
+      const BoundVector diag = cov.diagonal();
+      cov.setZero();
+      cov.diagonal() = diag;
+    }
+    if (scaling != 1.) {
+      cov *= scaling;
+    }
+    for (std::size_t i = 0; i < eBoundSize; ++i) {
+      const double limit = ceilings[i] > 0. ? ceilings[i] : ceiling;
+      if (limit > 0. && cov(i, i) > limit) {
+        // Scale the row and column rather than only the diagonal, so a clipped
+        // variance cannot leave a correlation coefficient above 1 and the
+        // matrix stays positive definite.
+        const double f = std::sqrt(limit / cov(i, i));
+        cov.row(i) *= f;
+        cov.col(i) *= f;
+      }
+    }
+  }
+
   auto make_propagator_options(
       const std::unordered_map<const Surface*, DafMeasurementGroup>&
           measurementGroups,
@@ -161,7 +205,8 @@ class DeterministicAnnealingFitter {
       const std::vector<const Surface*>* sSequence,
       DafCandidateMap& candidateState, traj_t& scratchStates,
       bool firstPass = false, bool recordReference = false,
-      DafReferenceTrajectory* referenceTrajectory = nullptr) const {
+      DafReferenceTrajectory* referenceTrajectory = nullptr,
+      Direction direction = Direction::Forward()) const {
     using DafActorT = Actor;
     using Actors = ActorList<DafActorT>;
     using PropagatorOptions = typename propagator_t::template Options<Actors>;
@@ -169,6 +214,9 @@ class DeterministicAnnealingFitter {
     PropagatorOptions propagatorOptions(dafOptions.geoContext,
                                         dafOptions.magFieldContext);
     propagatorOptions.setPlainOptions(dafOptions.propagatorPlainOptions);
+    // Set after setPlainOptions, which would otherwise overwrite it with the
+    // forward default.
+    propagatorOptions.direction = direction;
 
     if constexpr (!isDirectNavigator) {
       for (const auto& [surface, group] : measurementGroups) {
@@ -183,7 +231,7 @@ class DeterministicAnnealingFitter {
     }
 
     auto& dafActor = propagatorOptions.actorList.template get<DafActorT>();
-    dafActor.inputMeasurementGroups = measurementGroups;
+    dafActor.inputMeasurementGroups = &measurementGroups;
     dafActor.multipleScattering = dafOptions.multipleScattering;
     dafActor.energyLoss = dafOptions.energyLoss;
     dafActor.freeToBoundCorrection = dafOptions.freeToBoundCorrection;
@@ -308,8 +356,10 @@ class DeterministicAnnealingFitter {
   /// shared by the filter and the weights -- and it keeps the drift length the
   /// weight chi2 is computed from equal to the one the filter actually fitted.
   /// See DafFitterOptions::referenceWeightCalibration.
+  /// @return what this pass observed, for the convergence tests -- the largest
+  /// weight change (GenFit's maxAbsChange) and the smoothed weighted chi2/ndf.
   template <typename track_proxy_t>
-  void updateCandidateWeights(
+  DafPassSummary updateCandidateWeights(
       track_proxy_t track,
       const std::unordered_map<const Surface*, DafMeasurementGroup>&
           measurementGroups,
@@ -317,6 +367,8 @@ class DeterministicAnnealingFitter {
       DafCandidateMap& candidateState, const AnnealingUtility& annealing,
       AnnealingUtility::State& annealingState, traj_t& scratchStates,
       const DafReferenceTrajectory* reference = nullptr) const {
+    DafPassSummary summary;
+
     // Index the reference by surface, so the loop below can ask for a surface's
     // recorded candidates in one lookup rather than scanning the trajectory.
     std::unordered_map<const Surface*, const std::vector<std::size_t>*>
@@ -451,10 +503,21 @@ class DeterministicAnnealingFitter {
             typename traj_t::ConstTrackStateProxy(candidates[i]));
       }
 
-      std::vector<double> weights(group.size());
-      for (std::size_t i = 0; i < group.size(); ++i) {
-        weights[i] = annealing.getWeight(annealingState, chi2s[i], chi2s);
+      // GenFit scales every term of the weight, candidates and cut-off alike,
+      // by that candidate's own 1/sqrt((2*pi)^d det S). Only collected when
+      // asked for: it is a no-op wherever the group shares one S, and paying
+      // for a determinant per candidate per pass is not.
+      std::vector<double> logNorms;
+      if (dafOptions.useCandidateNormalization) {
+        logNorms.resize(group.size());
+        for (std::size_t i = 0; i < group.size(); ++i) {
+          logNorms[i] = dafOptions.extensions.logNormalization(
+              typename traj_t::ConstTrackStateProxy(candidates[i]));
+        }
       }
+
+      const std::vector<double> weights = annealing.getWeights(
+          annealingState, chi2s, logNorms.empty() ? nullptr : &logNorms);
 
       DafCandidateState& candState = candidateState[surface];
       // Single-candidate surfaces are skipped: their weight is trivially ~1
@@ -469,6 +532,15 @@ class DeterministicAnnealingFitter {
         ACTS_DEBUG("DAF weight update on surface " << surface->geometryId()
                                                    << ":" << ss.str());
       }
+      // Read before the new weights overwrite the old ones.
+      for (std::size_t i = 0; i < weights.size(); ++i) {
+        summary.maxAbsWeightChange =
+            std::max(summary.maxAbsWeightChange,
+                     std::abs(weights[i] - candState.weights[i]));
+        summary.weightedChi2 += weights[i] * chi2s[i];
+      }
+      summary.ndf += static_cast<double>(ts.calibratedSize());
+
       candState.weights = weights;
       candState.chi2 = chi2s;
       // Where this pass's own smoothed track crossed the surface, in the same
@@ -476,7 +548,266 @@ class DeterministicAnnealingFitter {
       // so a trace can show the track moving as the weights that pull it
       // change, rather than only the final trajectory.
       candState.trackLoc0 = ts.smoothed()[eBoundLoc0];
+
+      // The linearisation point this pass used on this surface. Only while a
+      // trace is being recorded: it is a per-pass comparison by construction,
+      // so a fit that keeps no history has nothing to compare against, and
+      // the frame construction below is not free.
+      //
+      // The PREDICTED state is the one the forward filter expanded F and H
+      // about, so it -- not the smoothed state -- is what "the expansion
+      // point moved" refers to. The smoothed state is recorded alongside it
+      // because the final pass's smoothed trajectory is the closest thing
+      // this fit has to the converged track a reference would be built from.
+      if (dafOptions.candidateTrace != nullptr) {
+        BoundVector linParams = ts.smoothed();
+        if (ts.hasPredicted()) {
+          linParams = ts.predicted();
+        }
+        candState.predictedParameters = linParams;
+        candState.smoothedParameters = ts.smoothed();
+        if (ts.hasJacobian()) {
+          candState.jacobian = ts.jacobian();
+        }
+        const Vector3 direction = makeDirectionFromPhiTheta(
+            linParams[eBoundPhi], linParams[eBoundTheta]);
+        const Vector3 position = surface->localToGlobal(
+            dafOptions.geoContext,
+            Vector2(linParams[eBoundLoc0], linParams[eBoundLoc1]), direction);
+        candState.globalPosition = position;
+        // A straw's measurement frame is built from the track direction, not
+        // from the wire alone, so this axis rotates as the fit updates phi
+        // and theta -- see DafCandidateState::measurementAxis.
+        // Held in a named matrix rather than assigned straight off the
+        // by-value return: a .col() of a temporary is legal here but reads
+        // like a dangling reference, and this costs nothing.
+        const RotationMatrix3 frame = surface->referenceFrame(
+            dafOptions.geoContext, position, direction);
+        candState.measurementAxis = frame.col(0);
+        candState.hasLinearization = true;
+      }
     }
+
+    // The five track parameters the measurements had to determine.
+    summary.ndf -= 5.;
+    return summary;
+  }
+
+  /// Report where two recordings of the same trajectory disagree.
+  ///
+  /// Used by referencePiecewiseSelfCheck: with anchoring off, a piecewise
+  /// recording must reproduce the continuous one, because the segment
+  /// boundaries fall exactly where the continuous recording already divides the
+  /// noise. A difference means the split lost something -- most likely a
+  /// surface's post-update material, which a propagation starting on that
+  /// surface can skip.
+  static void reportReferenceDifference(
+      const DafReferenceTrajectory& piecewise,
+      const DafReferenceTrajectory& continuous, const Logger& logger) {
+    ACTS_INFO("Reference self-check: piecewise " << piecewise.size()
+              << " state(s), continuous " << continuous.size());
+
+    // A length mismatch has two very different causes and the counts alone do
+    // not separate them:
+    //   GRAZING   -- one recording touches a surface the other misses. The
+    //                piecewise pass restarts on each surface, so it does not
+    //                carry the continuous pass's accumulated drift and can
+    //                catch a marginal surface that drifts past. Harmless: an
+    //                unused reference state.
+    //   REPEATED  -- the sequence lists one surface twice (a curler
+    //                re-crossing a straw). The piecewise loop then records it
+    //                twice while the navigator collapses it, leaving TWO
+    //                reference states on one surface for DafReferenceFilter to
+    //                match against. Not harmless.
+    // So report which surfaces are unmatched, and compare the common ones
+    // anyway rather than giving up on the whole check.
+    auto duplicates = [](const DafReferenceTrajectory& t) {
+      std::unordered_map<const Surface*, std::size_t> seen;
+      for (const DafReferenceState& r : t) {
+        ++seen[r.surface];
+      }
+      std::size_t extra = 0;
+      for (const auto& entry : seen) {
+        if (entry.second > 1) {
+          extra += entry.second - 1;
+        }
+      }
+      return extra;
+    };
+    const std::size_t repeatedPiecewise = duplicates(piecewise);
+    const std::size_t repeatedContinuous = duplicates(continuous);
+    if (repeatedPiecewise != 0 || repeatedContinuous != 0) {
+      ACTS_INFO("  REPEATED SURFACES: piecewise " << repeatedPiecewise
+                << ", continuous " << repeatedContinuous
+                << " -- the sequence lists a surface more than once, so the "
+                   "reference carries more than one state for it");
+    }
+
+    // Align the two by surface, in order, collecting what only one side has.
+    std::vector<const Surface*> onlyPiecewise, onlyContinuous;
+    double worstParams = 0., worstJacobian = 0., worstNoise = 0.;
+    std::size_t worstIndex = 0, compared = 0, spanMismatched = 0;
+    std::size_t i = 0, j = 0;
+    // The first state after an insertion cannot be compared. `jacobian` is the
+    // transport from the PREVIOUS reference state and `noise` the material over
+    // the segment ENDING here (DafReferenceState.hpp), so if one recording has
+    // an extra surface B between A and C, then at C it holds F(B->C) while the
+    // other holds F(A->C). Different spans, so a large difference there is
+    // arithmetic, not error -- reporting it as the worst case is misleading.
+    bool afterInsertion = false;
+    auto nextMatch = [](const DafReferenceTrajectory& t, std::size_t from,
+                        const Surface* surface) {
+      for (std::size_t k = from; k < t.size(); ++k) {
+        if (t[k].surface == surface) {
+          return k;
+        }
+      }
+      return t.size();
+    };
+    while (i < piecewise.size() && j < continuous.size()) {
+      if (piecewise[i].surface == continuous[j].surface) {
+        if (afterInsertion) {
+          afterInsertion = false;
+          ++spanMismatched;
+          ++i;
+          ++j;
+          continue;
+        }
+        const double dp = (piecewise[i].parameters - continuous[j].parameters)
+                              .cwiseAbs().maxCoeff();
+        const double dj = (piecewise[i].jacobian - continuous[j].jacobian)
+                              .cwiseAbs().maxCoeff();
+        const double dn =
+            (piecewise[i].noise - continuous[j].noise).cwiseAbs().maxCoeff();
+        if (dp + dj + dn > worstParams + worstJacobian + worstNoise) {
+          worstIndex = i;
+        }
+        worstParams = std::max(worstParams, dp);
+        worstJacobian = std::max(worstJacobian, dj);
+        worstNoise = std::max(worstNoise, dn);
+        ++i;
+        ++j;
+        ++compared;
+        continue;
+      }
+      // Skip whichever side has to travel less far to resynchronise.
+      const std::size_t inContinuous = nextMatch(continuous, j, piecewise[i].surface);
+      const std::size_t inPiecewise = nextMatch(piecewise, i, continuous[j].surface);
+      if (inContinuous != continuous.size() &&
+          (inPiecewise == piecewise.size() ||
+           inContinuous - j <= inPiecewise - i)) {
+        for (; j < inContinuous; ++j) {
+          onlyContinuous.push_back(continuous[j].surface);
+        }
+      } else if (inPiecewise != piecewise.size()) {
+        for (; i < inPiecewise; ++i) {
+          onlyPiecewise.push_back(piecewise[i].surface);
+        }
+      } else {
+        onlyPiecewise.push_back(piecewise[i++].surface);
+        onlyContinuous.push_back(continuous[j++].surface);
+      }
+      afterInsertion = true;
+    }
+    for (; i < piecewise.size(); ++i) {
+      onlyPiecewise.push_back(piecewise[i].surface);
+    }
+    for (; j < continuous.size(); ++j) {
+      onlyContinuous.push_back(continuous[j].surface);
+    }
+
+    auto listSurfaces = [](const std::vector<const Surface*>& surfaces) {
+      std::ostringstream out;
+      const std::size_t shown = std::min<std::size_t>(surfaces.size(), 6);
+      for (std::size_t k = 0; k < shown; ++k) {
+        out << " " << surfaces[k]->geometryId();
+      }
+      if (surfaces.size() > shown) {
+        out << " ... (" << surfaces.size() - shown << " more)";
+      }
+      return out.str();
+    };
+    if (!onlyPiecewise.empty()) {
+      ACTS_INFO("  only in PIECEWISE (" << onlyPiecewise.size() << "):"
+                << listSurfaces(onlyPiecewise));
+    }
+    if (!onlyContinuous.empty()) {
+      ACTS_INFO("  only in CONTINUOUS (" << onlyContinuous.size() << "):"
+                << listSurfaces(onlyContinuous));
+    }
+
+    if (compared == 0) {
+      ACTS_INFO("  no surface is common to both recordings");
+      return;
+    }
+    if (spanMismatched != 0) {
+      ACTS_INFO("  " << spanMismatched
+                << " state(s) NOT compared: they follow an insertion, so the "
+                   "two recordings transport them over different spans");
+    }
+    ACTS_INFO("  over " << compared << " common surface(s): max |dparameters| = "
+              << worstParams << ", max |djacobian| = " << worstJacobian
+              << ", max |dnoise| = " << worstNoise << " (worst at state "
+              << worstIndex << ")");
+    if (worstNoise > 1e-9) {
+      ACTS_INFO("  NOISE DIFFERS: the piecewise recording is not accounting "
+                "for the same material as the continuous one. Suspect a "
+                "surface's post-update material being skipped by the "
+                "propagation that starts on it.");
+    }
+  }
+
+  /// Combine a forward-filtered and a backward-predicted state into the
+  /// smoothed one, GenFit's calcAverageState (MeasuredStateOnPlane.cc:76):
+  ///
+  ///   C_s = (C_f^-1 + C_b^-1)^-1
+  ///   x_s = C_s (C_f^-1 x_f + C_b^-1 x_b)
+  ///
+  /// The forward state must be FILTERED and the backward one PREDICTED, so the
+  /// measurement on this surface is counted exactly once -- that pairing is
+  /// what KalmanFitterInfo::getFittedState(biased=true) returns.
+  ///
+  /// @return false if the information sum is not invertible, leaving @p
+  /// smoothed untouched so the caller can fall back.
+  static bool combineForwardBackward(const BoundVector& forwardParams,
+                                     const BoundSquareMatrix& forwardCov,
+                                     const BoundVector& backwardParams,
+                                     const BoundSquareMatrix& backwardCov,
+                                     BoundVector& smoothedParams,
+                                     BoundSquareMatrix& smoothedCov) {
+    const Eigen::LLT<BoundSquareMatrix> fLLT(forwardCov);
+    const Eigen::LLT<BoundSquareMatrix> bLLT(backwardCov);
+    if (fLLT.info() != Eigen::Success || bLLT.info() != Eigen::Success) {
+      return false;
+    }
+    const BoundSquareMatrix fInfo = forwardCov.inverse();
+    const BoundSquareMatrix bInfo = backwardCov.inverse();
+
+    // phi is periodic: combining 3.13 and -3.13 as plain numbers averages to
+    // ~0, pointing the track backwards. Difference the backward state against
+    // the forward one on the wrapped branch, combine the DIFFERENCE, and add it
+    // back -- so the result is always within half a turn of the forward state.
+    BoundVector delta = backwardParams - forwardParams;
+    delta[eBoundPhi] = detail::radian_sym(delta[eBoundPhi]);
+
+    const BoundSquareMatrix sum = fInfo + bInfo;
+    const Eigen::LLT<BoundSquareMatrix> sLLT(sum);
+    if (sLLT.info() != Eigen::Success) {
+      return false;
+    }
+    smoothedCov = sum.inverse();
+    if (!smoothedCov.allFinite()) {
+      return false;
+    }
+    smoothedParams = forwardParams + smoothedCov * (bInfo * delta);
+    // ACTS's canonical normalisation: folds theta back into [0, pi] and flips
+    // phi by pi when it does, which a bare phi wrap would get wrong for a very
+    // forward or backward track whose combined theta lands just outside.
+    const auto [phi, theta] = detail::normalizePhiTheta(
+        smoothedParams[eBoundPhi], smoothedParams[eBoundTheta]);
+    smoothedParams[eBoundPhi] = phi;
+    smoothedParams[eBoundTheta] = theta;
+    return smoothedParams.allFinite();
   }
 
   /// Common fit implementation: runs the outer annealing loop.
@@ -548,6 +879,23 @@ class DeterministicAnnealingFitter {
 
     Acts::TrackContainer scratchTrackContainer{VectorTrackContainer{},
                                                traj_t{}};
+
+    // Scratch for the two-filter smoother's backward filter, built the same way
+    // as scratchTrackContainer. Owned here so it outlives every pass and is
+    // cleared per use rather than reallocated.
+    traj_t backwardCandidateStates;
+    Acts::TrackContainer backwardTrackContainer{VectorTrackContainer{},
+                                                traj_t{}};
+
+    // Previous pass's smoothed state per surface, the linearisation points
+    // referenceAnchorSmoothed re-references around. Empty on the first pass,
+    // which is why that pass necessarily falls back to transporting the seed.
+    std::unordered_map<const Surface*, BoundVector> referenceAnchors;
+    // Scratch for the piecewise recording: one segment's worth of surfaces and
+    // the states it produces, reused rather than reallocated per segment.
+    std::vector<const Surface*> segmentSequence;
+    traj_t segmentStates;
+    DafReferenceTrajectory segmentTrajectory;
 
     // Re-seed each pass from the previous pass's own smoothed trajectory,
     // starting from the caller-supplied seed on the very first pass --
@@ -684,7 +1032,14 @@ class DeterministicAnnealingFitter {
       ACTS_DEBUG("Seed carries no covariance; the reference filter starts from "
                  "the identity");
     }
-    referenceStartCovariance *= dafOptions.referenceStartCovarianceScaling;
+    // The same treatment the reseed path gets: reset off-diagonals, scale,
+    // then clip per parameter. A bare multiply would drive sigma(phi) and
+    // sigma(theta) toward the branch cut as soon as the scaling is turned up.
+    blowUpCovariance(referenceStartCovariance,
+                     dafOptions.referenceStartCovarianceScaling,
+                     dafOptions.referenceStartResetOffDiagonals,
+                     dafOptions.referenceStartVarianceCeiling,
+                     dafOptions.referenceStartVarianceCeilings);
 
     // Which surface referenceStartCovariance is valid on, and whether it has
     // been replaced by the transported version cached after the first pass.
@@ -724,6 +1079,25 @@ class DeterministicAnnealingFitter {
         return filter_impl(seed, propagatorOptions, container);
       }
 
+      // ================= x_ref, F and Q ARE REBUILT HERE =================
+      // Once per annealing pass, and nowhere else. Everything downstream in
+      // this pass -- filter, smoother, weight update -- reads the values
+      // recorded by the single propagation below and never recomputes them.
+      ACTS_DEBUG("=== REFERENCE REBUILD: discarding "
+                 << referenceTrajectory.size()
+                 << " state(s) from the previous pass and re-recording x_ref, "
+                    "F and Q by one RK propagation from "
+                 << seed.referenceSurface().geometryId()
+                 << "  loc0=" << seed.parameters()[eBoundLoc0]
+                 << " loc1=" << seed.parameters()[eBoundLoc1]
+                 << " phi=" << seed.parameters()[eBoundPhi]
+                 << " theta=" << seed.parameters()[eBoundTheta]
+                 << " q/p=" << seed.parameters()[eBoundQOverP]
+                 << "  (source: "
+                 << (firstPass ? "the track-finding seed"
+                               : "the PREVIOUS pass's smoothed state at its "
+                                 "first measurement, covariance blown up")
+                 << ")");
       referenceTrajectory.clear();
       referenceRecordingStates.clear();
 
@@ -741,10 +1115,205 @@ class DeterministicAnnealingFitter {
           scratchCandidateStates, firstPass, /*recordReference=*/true,
           &referenceTrajectory);
 
-      auto recordResult = record_impl(referenceSeed, propagatorOptions,
-                                      referenceRecordingStates);
-      if (!recordResult.ok()) {
-        return recordResult.error();
+      // One segment per step of the prepared sequence, each propagated from the
+      // previous reference state -- GenFit's prepareTrack. The boundaries fall
+      // where the continuous recording already divides the noise, so with
+      // anchoring off this must reproduce it; referencePiecewiseSelfCheck is
+      // what verifies that.
+      auto recordPiecewise = [&]() -> Result<void> {
+        if (passSequencePtr == nullptr || passSequencePtr->size() < 2) {
+          return Result<void>::success();   // nothing to split
+        }
+        BoundVector current = seed.parameters();
+        const Surface* currentSurface = &seed.referenceSurface();
+        std::size_t skippedTargets = 0;
+        const BoundVector* previousReference = nullptr;
+        BoundVector previousReferenceStorage = BoundVector::Zero();
+
+        // Built ONCE, outside the loop. make_propagator_options deep-copies the
+        // whole measurement-group map into the actor; at ~110 segments x ~9
+        // passes that is ~1000 copies of a ~50-entry map per track, where the
+        // continuous path pays for 9. Nothing in the options varies per segment
+        // except the two-surface sequence, and the actor holds the trajectory by
+        // POINTER, so clearing and refilling segmentTrajectory keeps working.
+        auto segmentOptions = make_propagator_options(
+            measurementGroups, dafOptions, &segmentSequence, candidateState,
+            scratchCandidateStates, firstPass, /*recordReference=*/true,
+            &segmentTrajectory);
+        // A segment spans ONE step of the sequence -- millimetres to a few
+        // centimetres. A segment that never intersects its target instead runs
+        // past endOfSurfaces() and keeps stepping to the global limit (50000
+        // via ACTS_MAX_STEPS), and the DEBUG log shows ~12 such targets per
+        // pass, so that waste is ~100x the useful work. Cap it well above any
+        // real segment and far below the global limit.
+        segmentOptions.maxSteps =
+            std::min<unsigned int>(segmentOptions.maxSteps, 2000u);
+
+        for (std::size_t i = 0; i < passSequencePtr->size(); ++i) {
+          const Surface* target = (*passSequencePtr)[i];
+          segmentSequence.clear();
+          if (currentSurface != target) {
+            segmentSequence.push_back(currentSurface);
+          }
+          segmentSequence.push_back(target);
+
+          segmentTrajectory.clear();
+          segmentStates.clear();
+          // externalSurfaces is a COPY made by make_propagator_options, so the
+          // per-segment sequence has to be pushed in here rather than relied on
+          // through segmentSequence. Two pointers.
+          segmentOptions.navigation.externalSurfaces = segmentSequence;
+          BoundTrackParameters segmentSeed(
+              currentSurface->getSharedPtr(), current, zeroCovariance,
+              seed.particleHypothesis());
+          // Where this segment starts. A start that has left the detector --
+          // or a momentum that has run away -- is what sends the stepper off
+          // the field map, and it points at the hand-off below rather than at
+          // the propagation itself.
+          const Vector3 segmentStart =
+              segmentSeed.position(dafOptions.geoContext);
+          ACTS_DEBUG("Piecewise segment " << i << "/" << passSequencePtr->size()
+                     << ": " << currentSurface->geometryId() << " -> "
+                     << target->geometryId() << "  start r="
+                     << segmentStart.head<2>().norm()
+                     << " z=" << segmentStart.z()
+                     << " loc0=" << current[eBoundLoc0]
+                     << " loc1=" << current[eBoundLoc1]
+                     << " phi=" << current[eBoundPhi]
+                     << " theta=" << current[eBoundTheta]
+                     << " q/p=" << current[eBoundQOverP]
+                     << " p=" << segmentSeed.absoluteMomentum());
+          auto segmentResult =
+              record_impl(segmentSeed, segmentOptions, segmentStates);
+          {
+            std::ostringstream recorded;
+            for (const DafReferenceState& r : segmentTrajectory) {
+              recorded << " " << r.surface->geometryId()
+                       << (r.hasMeasurement ? "(m)" : "");
+            }
+            ACTS_DEBUG("  segment " << i << " -> "
+                       << (segmentResult.ok()
+                               ? std::string("ok")
+                               : segmentResult.error().message())
+                       << ", recorded " << segmentTrajectory.size()
+                       << " state(s):"
+                       << (segmentTrajectory.empty() ? std::string(" none")
+                                                     : recorded.str()));
+          }
+          // Whether the segment produced this target's state is the ONLY
+          // criterion. record_impl's return code cannot be used as one: it
+          // ends with a guard demanding at least one measurement state, which
+          // is written for a whole-track recording, and a segment is ONE step
+          // of the sequence that usually lands on a material-only surface. So
+          // NoMeasurementFound is the normal case here, and by the time that
+          // guard runs the actor has already appended what the segment owed.
+          auto it = std::find_if(segmentTrajectory.rbegin(),
+                                 segmentTrajectory.rend(),
+                                 [&](const DafReferenceState& r) {
+                                   return r.surface == target;
+                                 });
+          if (it == segmentTrajectory.rend()) {
+            // NOT the end of the track. The DirectNavigator drops sequence
+            // entries the trajectory does not intersect and carries on -- the
+            // continuous recording of the same track skips them too, which is
+            // why it is SHORTER than the sequence. Do the same: leave the
+            // state where it is and aim at the next entry. Treating this as
+            // the end truncated the reference to 40 of 87 steps.
+            //
+            // A propagation error here is a CONSEQUENCE of the miss, not an
+            // independent failure: a two-surface segment that never intersects
+            // its target runs past endOfSurfaces() and keeps stepping until it
+            // hits the path limit or leaves the field map. `current` is
+            // untouched, so skipping is safe.
+            ++skippedTargets;
+            ACTS_DEBUG("Piecewise reference: segment " << i << " never reached "
+                       << target->geometryId() << " (from "
+                       << currentSurface->geometryId() << " at r="
+                       << segmentStart.head<2>().norm() << " z="
+                       << segmentStart.z() << ")"
+                       << (segmentResult.ok()
+                               ? std::string()
+                               : " -- propagation also reported " +
+                                     segmentResult.error().message())
+                       << "; skipping it, as the continuous navigator does");
+            continue;
+          }
+          DafReferenceState record = *it;
+
+          // Re-linearise around the previous pass's smoothed state where there
+          // is one. F and N stay the transport of the PREVIOUS reference to
+          // this surface; only the expansion point moves, and deltaState is
+          // what absorbs the difference.
+          if (dafOptions.referenceAnchorSmoothed) {
+            auto anchor = referenceAnchors.find(target);
+            if (anchor != referenceAnchors.end()) {
+              record.parameters = anchor->second;
+            }
+          }
+          if (previousReference != nullptr) {
+            record.deltaState =
+                record.parameters - record.jacobian * (*previousReference);
+          }
+          referenceTrajectory.push_back(record);
+
+          previousReferenceStorage = record.parameters;
+          previousReference = &previousReferenceStorage;
+          current = record.parameters;
+          currentSurface = target;
+        }
+        std::size_t withMeasurement = 0;
+        for (const DafReferenceState& r : referenceTrajectory) {
+          withMeasurement += static_cast<std::size_t>(r.hasMeasurement);
+        }
+        ACTS_DEBUG("Piecewise reference: " << referenceTrajectory.size()
+                   << " state(s) from " << passSequencePtr->size()
+                   << " sequence step(s), " << withMeasurement
+                   << " with a measurement, " << skippedTargets
+                   << " unreachable surface(s) skipped");
+        return Result<void>::success();
+      };
+
+      if (dafOptions.referencePiecewise) {
+        auto piecewiseResult = recordPiecewise();
+        if (!piecewiseResult.ok()) {
+          return piecewiseResult.error();
+        }
+        if (dafOptions.referencePiecewiseSelfCheck) {
+          DafReferenceTrajectory continuousTrajectory;
+          traj_t continuousStates;
+          auto checkOptions = make_propagator_options(
+              measurementGroups, dafOptions, passSequencePtr, candidateState,
+              scratchCandidateStates, firstPass, /*recordReference=*/true,
+              &continuousTrajectory);
+          auto checkResult =
+              record_impl(referenceSeed, checkOptions, continuousStates);
+          if (checkResult.ok()) {
+            reportReferenceDifference(referenceTrajectory, continuousTrajectory,
+                                      logger());
+          }
+        }
+      } else {
+        auto recordResult = record_impl(referenceSeed, propagatorOptions,
+                                        referenceRecordingStates);
+        if (!recordResult.ok()) {
+          return recordResult.error();
+        }
+      }
+
+      if (logger().doPrint(Logging::DEBUG)) {
+        std::size_t withMeas = 0;
+        for (const DafReferenceState& r : referenceTrajectory) {
+          withMeas += static_cast<std::size_t>(r.hasMeasurement);
+        }
+        ACTS_DEBUG("=== REFERENCE REBUILD done: "
+                   << referenceTrajectory.size() << " state(s), " << withMeas
+                   << " with a measurement, s = 0 -> "
+                   << (referenceTrajectory.empty()
+                           ? 0.
+                           : referenceTrajectory.back().pathLength)
+                   << " mm. x_ref, F and Q are now FIXED for this pass; the "
+                      "filter and smoother below do pure linear algebra on "
+                      "them and touch neither the propagator nor the geometry.");
       }
 
       // Only when this pass's first recorded state really is that surface;
@@ -759,9 +1328,26 @@ class DeterministicAnnealingFitter {
                    "covariance");
       }
 
+      // Which prior THIS pass filters against, and the scaling already folded
+      // into it. Both candidates are scaled at the point they are built
+      // (referenceStartCovariance and cachedStartCovariance), so whichever is
+      // chosen here carries the scaling -- it applies on every pass, not only
+      // the first. Printed per pass so that is verifiable rather than assumed.
+      const BoundSquareMatrix& startPrior =
+          useCached ? cachedStartCovariance : referenceStartCovariance;
+      ACTS_DEBUG("=== REFERENCE PRIOR for this pass: "
+                 << (useCached ? "the cached transported prior"
+                               : "the seed covariance")
+                 << ", scaled by " << dafOptions.referenceStartCovarianceScaling
+                 << " -> tr = " << startPrior.trace()
+                 << ", sqrt(diag) loc0=" << std::sqrt(std::max(0., startPrior(eBoundLoc0, eBoundLoc0)))
+                 << " loc1=" << std::sqrt(std::max(0., startPrior(eBoundLoc1, eBoundLoc1)))
+                 << " phi=" << std::sqrt(std::max(0., startPrior(eBoundPhi, eBoundPhi)))
+                 << " theta=" << std::sqrt(std::max(0., startPrior(eBoundTheta, eBoundTheta)))
+                 << " qop=" << std::sqrt(std::max(0., startPrior(eBoundQOverP, eBoundQOverP))));
+
       return detail::dafReferenceFilter(
-          referenceTrajectory, scratchCandidateStates,
-          useCached ? cachedStartCovariance : referenceStartCovariance,
+          referenceTrajectory, scratchCandidateStates, startPrior,
           candidateState, dafOptions, container, logger());
     };
 
@@ -784,6 +1370,132 @@ class DeterministicAnnealingFitter {
                         << ss.str() << "; final w:" << weightSummary());
     };
 
+    // GenFit's smoothing: a second Kalman filter run BACKWARD from the last
+    // measurement, combined with the forward one. Returns false if it could not
+    // be done, and the caller then falls back to the RTS smoother -- this is
+    // strictly an alternative route to the same smoothed estimate, so failing
+    // over costs accuracy only through non-linearity, never correctness.
+    auto smoothByTwoFilter = [&](auto& track, auto& container) -> bool {
+      if (!dafOptions.useTwoFilterSmoothing) {
+        return false;
+      }
+
+      // The backward filter starts where the forward one ended, with its
+      // information thrown away -- GenFit blows up the last point's backward
+      // prediction before running (KalmanFitterRefTrack.cc:202).
+      auto lastMeasurement = findLastMeasurementState(track);
+      if (!lastMeasurement.ok()) {
+        ACTS_DEBUG("Two-filter smoothing: no last measurement state to start "
+                   "the backward filter from; falling back to RTS");
+        return false;
+      }
+      const auto lastState = lastMeasurement.value();
+      if (!lastState.hasFiltered()) {
+        ACTS_DEBUG("Two-filter smoothing: the last measurement carries no "
+                   "filtered state; falling back to RTS");
+        return false;
+      }
+      BoundSquareMatrix startCov = lastState.filteredCovariance();
+      blowUpCovariance(startCov, dafOptions.twoFilterBlowUpFactor,
+                       dafOptions.reseedResetOffDiagonals,
+                       dafOptions.reseedVarianceCeiling,
+                       dafOptions.reseedVarianceCeilings);
+      BoundTrackParameters backwardSeed(
+          lastState.referenceSurface().getSharedPtr(), lastState.filtered(),
+          startCov, currentSeed.particleHypothesis());
+
+      // The SAME sequence, not a reversed copy. DirectNavigator::nextSurface
+      // decrements its index when the propagation direction is backward
+      // (DirectNavigator.hpp:167), so it walks this list inward on its own --
+      // reversing it here as well would double-reverse and walk it outward
+      // again, silently. ACTS's own KalmanFitter passes its sequence unchanged
+      // to the reversed pass for the same reason.
+      // firstPass=false: the straw prior is a first-pass-only initialisation
+      // and must not be re-applied here, and this pass must not touch the
+      // candidate weights at all -- it only re-filters the combination the
+      // current weights already define.
+      backwardCandidateStates.clear();
+      auto backwardOptions = make_propagator_options(
+          measurementGroups, dafOptions, passSequencePtr,
+          candidateState, backwardCandidateStates, /*firstPass=*/false,
+          /*recordReference=*/false, /*referenceTrajectory=*/nullptr,
+          Direction::Backward());
+
+      backwardTrackContainer.clear();
+      auto backwardResult =
+          filter_impl(backwardSeed, backwardOptions, backwardTrackContainer);
+      if (!backwardResult.ok()) {
+        ACTS_DEBUG("Two-filter smoothing: backward pass failed ("
+                   << backwardResult.error() << "); falling back to RTS");
+        return false;
+      }
+
+      // Index the backward pass by surface so each forward state can find its
+      // partner in one lookup.
+      std::unordered_map<const Surface*, std::size_t> backwardBySurface;
+      for (const auto ts : backwardResult.value().trackStatesReversed()) {
+        if (ts.hasPredicted()) {
+          backwardBySurface.emplace(&ts.referenceSurface(), ts.index());
+        }
+      }
+
+      std::size_t combined = 0;
+      std::size_t missing = 0;
+      // Reversed, not forward: forward iteration needs a stemIndex, which the
+      // DAF's tracks never set (the propagation only links tip-ward), and
+      // asking for it throws "Track has no stem index". Order is irrelevant
+      // here anyway -- each surface is combined independently of the others.
+      for (auto ts : track.trackStatesReversed()) {
+        if (!ts.hasCalibrated() || !ts.hasFiltered()) {
+          continue;
+        }
+        auto it = backwardBySurface.find(&ts.referenceSurface());
+        if (it == backwardBySurface.end()) {
+          ++missing;
+          continue;
+        }
+        const auto back =
+            backwardTrackContainer.trackStateContainer().getTrackState(
+                it->second);
+        BoundVector smoothedParams;
+        BoundSquareMatrix smoothedCov;
+        if (!combineForwardBackward(ts.filtered(), ts.filteredCovariance(),
+                                    back.predicted(), back.predictedCovariance(),
+                                    smoothedParams, smoothedCov)) {
+          ++missing;
+          continue;
+        }
+        // DafActor allocates each state with Predicted|Filtered|Jacobian|
+        // Calibrated and NOT Smoothed, so the component has to be added before
+        // it can be written -- GainMatrixSmoother.hpp:85 does the same before
+        // its own write, which is why the RTS path works without this.
+        ts.addComponents(TrackStatePropMask::Smoothed);
+        ts.smoothed() = smoothedParams;
+        ts.smoothedCovariance() = smoothedCov;
+        ++combined;
+      }
+
+      if (combined == 0) {
+        ACTS_DEBUG("Two-filter smoothing: no surface could be combined; "
+                   "falling back to RTS");
+        return false;
+      }
+      if (missing > 0) {
+        // A partial result would leave some surfaces holding whatever was in
+        // `smoothed` before, which the weight update would then score against.
+        // Redoing the whole track with the RTS smoother is the only consistent
+        // option.
+        ACTS_DEBUG("Two-filter smoothing: " << missing << " of "
+                   << (combined + missing)
+                   << " surfaces had no usable backward partner; falling back "
+                      "to RTS for the whole track");
+        return false;
+      }
+      ACTS_VERBOSE("Two-filter smoothing: combined " << combined
+                                                     << " surface(s)");
+      return true;
+    };
+
     // Runs one forward+smooth pass into the caller's output container using
     // the given seed and whatever weights candidateState currently holds, then
     // extrapolates to the reference surface. This is the "official" result-
@@ -798,11 +1510,17 @@ class DeterministicAnnealingFitter {
       }
       TrackProxy track = forwardResult.value();
 
-      auto smoothRes = dafOptions.extensions.smoother(
-          dafOptions.geoContext, trackContainer.trackStateContainer(),
-          track.tipIndex(), logger());
-      if (!smoothRes.ok()) {
-        return smoothRes.error();
+      // GenFit's two-filter smoothing when asked for, the RTS smoother
+      // otherwise -- and also whenever the backward route could not complete,
+      // since a partially combined track would leave some surfaces holding a
+      // stale smoothed state for the weight update to score against.
+      if (!smoothByTwoFilter(track, trackContainer)) {
+        auto smoothRes = dafOptions.extensions.smoother(
+            dafOptions.geoContext, trackContainer.trackStateContainer(),
+            track.tipIndex(), logger());
+        if (!smoothRes.ok()) {
+          return smoothRes.error();
+        }
       }
 
       if (trackContainer.hasColumn(hashString("smoothed"))) {
@@ -869,8 +1587,19 @@ class DeterministicAnnealingFitter {
       return salvaged;
     };
 
+    // Set once a convergence test fires, so the NEXT pass is the one that
+    // writes the output and the loop then ends -- GenFit's oneLastIter, which
+    // gives the converged weights one full pass to act through rather than
+    // returning the pass that merely detected convergence.
+    bool oneLastIteration = false;
+    // GenFit seeds lastPval to -1 so that its `lastPval >= minPval_` term is
+    // false on the first evaluation: the p-value test needs TWO consecutive
+    // passes, and this is what stops it firing on the strength of one.
+    double lastPValue = -1.;
+
     for (std::size_t iter = 0; iter < totalIterations; ++iter) {
-      const bool isFinalIteration = (iter + 1 == totalIterations);
+      const bool isFinalIteration =
+          oneLastIteration || (iter + 1 == totalIterations);
 
       const auto& seedPars = currentSeed.parameters();
       ACTS_DEBUG("DAF pass "
@@ -906,13 +1635,15 @@ class DeterministicAnnealingFitter {
       }
       auto forwardTrack = forwardResult.value();
 
-      auto smoothRes = dafOptions.extensions.smoother(
-          dafOptions.geoContext, scratchTrackContainer.trackStateContainer(),
-          forwardTrack.tipIndex(), logger());
-      if (!smoothRes.ok()) {
-        ACTS_DEBUG("Smoothing step failed on pass " << iter << ": "
-                                                    << smoothRes.error());
-        return salvage(smoothRes.error());
+      if (!smoothByTwoFilter(forwardTrack, scratchTrackContainer)) {
+        auto smoothRes = dafOptions.extensions.smoother(
+            dafOptions.geoContext, scratchTrackContainer.trackStateContainer(),
+            forwardTrack.tipIndex(), logger());
+        if (!smoothRes.ok()) {
+          ACTS_DEBUG("Smoothing step failed on pass " << iter << ": "
+                                                      << smoothRes.error());
+          return salvage(smoothRes.error());
+        }
       }
 
       // Cache the prior this pass had at its innermost measurement, for every
@@ -933,9 +1664,18 @@ class DeterministicAnnealingFitter {
         // path inflates its re-seed covariance on EVERY pass
         // (reseedCovarianceScaling), so leaving this one unscaled is also what
         // made the two paths incomparable.
-        cachedStartCovariance *= dafOptions.referenceStartCovarianceScaling;
+        blowUpCovariance(cachedStartCovariance,
+                         dafOptions.referenceStartCovarianceScaling,
+                         dafOptions.referenceStartResetOffDiagonals,
+                         dafOptions.referenceStartVarianceCeiling,
+                         dafOptions.referenceStartVarianceCeilings);
         if (referenceStartSurface != nullptr) {
           referenceStartCovarianceCached = true;
+          ACTS_DEBUG("=== REFERENCE PRIOR cached at "
+                     << referenceStartSurface->geometryId()
+                     << ": every LATER pass filters its rebuilt reference "
+                        "against this covariance instead of the seed's. Only "
+                        "captured once, from this pass.");
           ACTS_DEBUG("Cached the reference filter's prior at surface "
                      << referenceStartSurface->geometryId()
                      << " for the remaining passes");
@@ -962,12 +1702,41 @@ class DeterministicAnnealingFitter {
         // it over unchanged counts their information twice, compounding once
         // per pass. See DafFitterOptions::reseedCovarianceScaling.
         BoundSquareMatrix seedCov = fm.smoothedCovariance();
-        if (dafOptions.reseedCovarianceScaling != 1.) {
-          seedCov *= dafOptions.reseedCovarianceScaling;
-        }
+
+        // GenFit's MeasuredStateOnPlane::blowUpCov, in its own order: reset
+        // the off-diagonals, scale, then clip every variance to a ceiling (its
+        // blowUpMaxVal, 1e6).
+        //
+        // The clip is what makes a large scaling survivable, and why GenFit can
+        // use 1000 where a uniform ACTS scaling cannot. GenFit's plane state
+        // (q/p, u', v', u, v) is entirely unbounded, so a huge variance just
+        // means "no information". An ACTS bound state carries phi and theta,
+        // which are periodic: past sigma ~ pi the prior is not merely flat but
+        // meaningless, the first update sends the direction anywhere, and
+        // normalizePhiTheta folds it back with a phi flip. Ceilings are per
+        // parameter so loc0/loc1/qop can take the full blow-up while the angles
+        // stay well inside the branch cut.
+        blowUpCovariance(seedCov, dafOptions.reseedCovarianceScaling,
+                         dafOptions.reseedResetOffDiagonals,
+                         dafOptions.reseedVarianceCeiling,
+                         dafOptions.reseedVarianceCeilings);
+        const BoundVector previousSeed = currentSeed.parameters();
         currentSeed = BoundTrackParameters(
             fm.referenceSurface().getSharedPtr(), fm.smoothed(), seedCov,
             currentSeed.particleHypothesis());
+        // This assignment is the ONLY thing that makes the next pass's x_ref
+        // differ from this one's. Nothing else feeds the rebuild above.
+        ACTS_DEBUG("=== REFERENCE SEED for the next pass: taken from the "
+                   "smoothed state at "
+                   << fm.referenceSurface().geometryId()
+                   << ", covariance blown up by "
+                   << dafOptions.reseedCovarianceScaling
+                   << ".  q/p " << previousSeed[eBoundQOverP] << " -> "
+                   << currentSeed.parameters()[eBoundQOverP]
+                   << ", phi " << previousSeed[eBoundPhi] << " -> "
+                   << currentSeed.parameters()[eBoundPhi]
+                   << ", theta " << previousSeed[eBoundTheta] << " -> "
+                   << currentSeed.parameters()[eBoundTheta]);
         ACTS_VERBOSE("Re-seeding next pass from the smoothed first-measurement "
                      "state on surface "
                      << fm.referenceSurface().geometryId()
@@ -978,12 +1747,63 @@ class DeterministicAnnealingFitter {
                    << firstMeasurement.error());
       }
 
-      updateCandidateWeights(forwardTrack, measurementGroups, dafOptions,
-                             candidateState, annealing, annealingState,
-                             scratchCandidateStates,
-                             dafOptions.referenceLinearization
-                                 ? &referenceTrajectory
-                                 : nullptr);
+      // This pass's smoothed states become the next pass's linearisation
+      // points. Captured from the same trajectory the weight update scores
+      // against, before the re-seed below moves anything.
+      if (dafOptions.referenceAnchorSmoothed) {
+        referenceAnchors.clear();
+        for (const auto ts : forwardTrack.trackStatesReversed()) {
+          if (ts.hasSmoothed()) {
+            referenceAnchors[&ts.referenceSurface()] = ts.smoothed();
+          }
+        }
+      }
+
+      const DafPassSummary passSummary = updateCandidateWeights(
+          forwardTrack, measurementGroups, dafOptions, candidateState,
+          annealing, annealingState, scratchCandidateStates,
+          dafOptions.referenceLinearization ? &referenceTrajectory : nullptr);
+
+      // GenFit's convergence tests, in GenFit's order and with its structure
+      // (DAF::processTrackWithRep). The weight test is primary; the p-value
+      // test is a FALLBACK that can only upgrade a "not converged" verdict,
+      // never overturn a converged one.
+      bool converged =
+          dafOptions.weightConvergenceTolerance > 0. &&
+          passSummary.maxAbsWeightChange <
+              dafOptions.weightConvergenceTolerance;
+      if (converged) {
+        ACTS_DEBUG("DAF weights converged after pass "
+                   << (iter + 1) << " (max |dw| = "
+                   << passSummary.maxAbsWeightChange << " < "
+                   << dafOptions.weightConvergenceTolerance << ")");
+      }
+
+      const double pValue =
+          (passSummary.ndf > 0.)
+              ? detail::chi2SurvivalFunction(passSummary.weightedChi2,
+                                             passSummary.ndf)
+              : std::numeric_limits<double>::quiet_NaN();
+      if (!converged && dafOptions.pValueConvergenceTolerance > 0. &&
+          iter + 1 >= dafOptions.pValueMinIterations &&
+          std::isfinite(pValue) && pValue > dafOptions.pValueMinimum &&
+          lastPValue >= dafOptions.pValueMinimum &&
+          std::abs(lastPValue - pValue) <
+              dafOptions.pValueConvergenceTolerance) {
+        ACTS_DEBUG("DAF converged by p-value after pass "
+                   << (iter + 1) << " (p = " << pValue << ", was " << lastPValue
+                   << ") even though the weights are still moving (max |dw| = "
+                   << passSummary.maxAbsWeightChange << ")");
+        converged = true;
+      }
+      lastPValue = pValue;
+
+      // minIterations gates BOTH tests, as GenFit's `iBeta >= minIterations_-1
+      // && converged` does -- the p-value route has its own, separate floor
+      // already applied above.
+      if (converged && iter + 1 >= dafOptions.minIterations) {
+        oneLastIteration = true;
+      }
 
       // Record before the annealing step below, so the entry carries the
       // temperature this pass actually ran at rather than the next one's.

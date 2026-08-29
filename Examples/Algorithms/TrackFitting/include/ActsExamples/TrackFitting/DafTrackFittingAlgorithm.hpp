@@ -99,6 +99,20 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
     /// ~16k rows/event. Naming the handful of events you actually want to
     /// visualise keeps a 10k-event fit and its per-pass plots in one pass.
     std::vector<std::size_t> weightTraceEvents;
+    /// (optional) Also write a per-event `daf-linearization-trace.csv`: one
+    /// row per surface per annealing pass holding the state the pass
+    /// linearised about, the transport Jacobian into that surface, and the
+    /// surface's measurement axis there. This is what quantifies how far a
+    /// plain running-state EKF's expansion point wanders between passes --
+    /// i.e. how much a fixed reference track (GenFit's KalmanFitterRefTrack)
+    /// could be worth on this sample.
+    ///
+    /// Requires outputCandidatesDir, and is restricted to the same events as
+    /// weightTraceEvents. Independent of outputWeightTrace: either one being
+    /// on captures the per-pass history both read from. Off by default, and
+    /// noticeably heavier than the weight trace -- ~47 numbers per row
+    /// against 10 -- so pick the events rather than tracing a whole run.
+    bool outputLinearizationTrace = false;
     /// KF-equivalence mode: trust the proto track's hit choices verbatim
     /// instead of re-gathering competing candidates per surface. Every
     /// surface group holds exactly the proto track's own pick (first pick

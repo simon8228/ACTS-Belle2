@@ -9,6 +9,10 @@
 #pragma once
 
 #include "Acts/Definitions/Algebra.hpp"
+
+#include <cmath>
+#include <numbers>
+
 #include "Acts/EventData/MeasurementHelpers.hpp"
 #include "Acts/EventData/SubspaceHelpers.hpp"
 
@@ -66,43 +70,35 @@ enum class DafChiSquareDenominator {
 /// @tparam kDenominator Which covariance to divide by
 /// @param candidate The calibrated candidate track state (its predicted
 /// component must already be set, e.g. shared from a sibling candidate)
-template <typename traj_t,
-          DafChiSquareDenominator kDenominator = DafChiSquareDenominator::Full>
-double defaultDafChiSquareCalculator(
+///
+/// The covariance S itself, shared by the chi2 and the log-normalisation below
+/// so the two provably divide by the same matrix -- they are the exponent and
+/// the prefactor of one Gaussian density, and a mismatch would silently stop
+/// them describing one.
+template <typename traj_t, std::size_t kMeasurementSize,
+          DafChiSquareDenominator kDenominator>
+SquareMatrix<kMeasurementSize> dafChiSquareDenominator(
     typename traj_t::ConstTrackStateProxy candidate) {
-  const std::size_t measdim = candidate.calibratedSize();
+  using ProjectedMatrix = SquareMatrix<kMeasurementSize>;
 
-  double chi2 = 0.;
-  visit_measurement(measdim, [&](auto N) {
-    constexpr std::size_t kMeasurementSize = decltype(N)::value;
-    using ProjectedVector = Vector<kMeasurementSize>;
-    using ProjectedMatrix = SquareMatrix<kMeasurementSize>;
+  const auto measuredCov =
+      candidate.template calibratedCovariance<kMeasurementSize>();
 
-    const auto measured = candidate.template calibrated<kMeasurementSize>();
-    const auto measuredCov =
-        candidate.template calibratedCovariance<kMeasurementSize>();
-
+  if constexpr (kDenominator == DafChiSquareDenominator::MeasurementOnly) {
+    return ProjectedMatrix(measuredCov);
+  } else {
     const auto validSubspaceIndices =
         candidate.template projectorSubspaceIndices<kMeasurementSize>();
     const FixedBoundSubspaceHelper<kMeasurementSize> subspaceHelper(
         validSubspaceIndices);
     const auto H = subspaceHelper.projector();
-
-    const auto predicted = candidate.predicted();
-    const auto predictedCovariance = candidate.predictedCovariance();
-
-    const ProjectedVector residual = measured - H * predicted;
     const ProjectedMatrix stateCovariance =
-        H * predictedCovariance * H.transpose();
+        H * candidate.predictedCovariance() * H.transpose();
 
-    ProjectedMatrix denominator;
     if constexpr (kDenominator == DafChiSquareDenominator::Full) {
-      denominator = stateCovariance + measuredCov;
-    } else if constexpr (kDenominator ==
-                         DafChiSquareDenominator::MeasurementOnly) {
-      denominator = measuredCov;
+      return ProjectedMatrix(stateCovariance + measuredCov);
     } else {
-      denominator = measuredCov - stateCovariance;
+      ProjectedMatrix denominator = measuredCov - stateCovariance;
       // The subtraction is exact in principle but ill-conditioned exactly where
       // the measurement dominates the prior, and a non-positive-definite
       // denominator would hand back a negative chi2 and a weight above 1.
@@ -115,11 +111,94 @@ double defaultDafChiSquareCalculator(
       if (llt.info() != Eigen::Success) {
         denominator = measuredCov;
       }
+      return denominator;
     }
+  }
+}
+
+template <typename traj_t,
+          DafChiSquareDenominator kDenominator = DafChiSquareDenominator::Full>
+double defaultDafChiSquareCalculator(
+    typename traj_t::ConstTrackStateProxy candidate) {
+  const std::size_t measdim = candidate.calibratedSize();
+
+  double chi2 = 0.;
+  visit_measurement(measdim, [&](auto N) {
+    constexpr std::size_t kMeasurementSize = decltype(N)::value;
+    using ProjectedVector = Vector<kMeasurementSize>;
+
+    const auto measured = candidate.template calibrated<kMeasurementSize>();
+
+    const auto validSubspaceIndices =
+        candidate.template projectorSubspaceIndices<kMeasurementSize>();
+    const FixedBoundSubspaceHelper<kMeasurementSize> subspaceHelper(
+        validSubspaceIndices);
+    const auto H = subspaceHelper.projector();
+
+    const ProjectedVector residual = measured - H * candidate.predicted();
+    const auto denominator =
+        dafChiSquareDenominator<traj_t, kMeasurementSize, kDenominator>(
+            candidate);
 
     chi2 = (residual.transpose() * denominator.inverse() * residual).value();
   });
   return chi2;
+}
+
+/// Log of the Gaussian normalisation that goes with the same candidate's chi2.
+///
+///   norm = 1 / sqrt( (2*pi)^d * det S )      ->   this returns log(norm)
+///
+/// GenFit multiplies every term of the DAF weight by exactly this factor
+/// (DAF.cc:313, `norm = 1./sqrt(twoPiN * detV)`), using each candidate's OWN S,
+/// and its own comment says why: "the following assumes that in the competing
+/// hits could have different V". ACTS's AnnealingUtility had no such term, so
+/// its weights were the norm-free
+///
+///     w_j = exp(-chi2_j/2T) / (sum_k exp(-chi2_k/2T) + cut)
+///
+/// which is only equal to GenFit's when every candidate on a surface shares one
+/// S. **CDC mirror pairs do not**: the drift resolution is evaluated separately
+/// for the left and the right hypothesis, so their variances differ, and the
+/// resulting tilt sqrt(S_b/S_a) is a median 1.5% but exceeds 5% on 20% of pairs
+/// and 25% on 2.7% of them (measured over 64948 pairs).
+///
+/// Deliberately a SEPARATE calculator rather than a second return value from
+/// the chi2 one: the delegate signature stays as it is, and the shared
+/// dafChiSquareDenominator() above is what keeps the two using the same S.
+/// They must, or the ratio stops being a Gaussian density.
+///
+/// @tparam traj_t The trajectory type
+/// @tparam kDenominator Which covariance to normalise by -- MUST match the one
+/// the chi2 calculator was connected with
+/// @param candidate The calibrated candidate track state
+template <typename traj_t,
+          DafChiSquareDenominator kDenominator = DafChiSquareDenominator::Full>
+double defaultDafLogNormalization(
+    typename traj_t::ConstTrackStateProxy candidate) {
+  const std::size_t measdim = candidate.calibratedSize();
+
+  double logNorm = 0.;
+  visit_measurement(measdim, [&](auto N) {
+    constexpr std::size_t kMeasurementSize = decltype(N)::value;
+    const auto denominator =
+        dafChiSquareDenominator<traj_t, kMeasurementSize, kDenominator>(
+            candidate);
+
+    const double det = denominator.determinant();
+    if (!(det > 0.) || !std::isfinite(det)) {
+      // A non-positive determinant means the denominator was not a usable
+      // covariance. Returning 0 makes the normalisation a no-op for this
+      // candidate rather than poisoning the whole surface's weights with a
+      // NaN, which is the same spirit as the chi2 calculator's own fallback.
+      logNorm = 0.;
+      return;
+    }
+    logNorm = -0.5 * (static_cast<double>(kMeasurementSize) *
+                          std::log(2. * std::numbers::pi) +
+                      std::log(det));
+  });
+  return logNorm;
 }
 
 }  // namespace Acts::detail

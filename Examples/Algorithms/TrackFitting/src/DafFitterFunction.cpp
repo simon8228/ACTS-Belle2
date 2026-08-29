@@ -124,6 +124,22 @@ unsigned stallStepsOverride() {
 /// Multiplies the path limit derived from the sequence span. A curler's arc
 /// length grows as its momentum falls, so a limit sized for a straight track
 /// truncates it mid-trajectory and it ends with too few measurements.
+/// Weight each DAF candidate by its own Gaussian prefactor
+/// 1/sqrt((2*pi)^d det S), as GenFit does. ON by default; set
+/// ACTS_DAF_CAND_NORM=0 to fall back to the norm-free weights.
+///
+/// A no-op unless the competing candidates on a surface have different
+/// covariances -- which for CDC drift circles they do: the left and right
+/// mirrors carry separately evaluated drift resolutions, already present in the
+/// measurement file.
+bool useCandidateNormalization() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DAF_CAND_NORM");
+    return env == nullptr || std::atoi(env) != 0;
+  }();
+  return value;
+}
+
 double pathLimitScale() {
   static const double value = [] {
     const char* env = std::getenv("ACTS_DAF_PATH_SCALE");
@@ -245,6 +261,35 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   /// Which covariance the per-candidate weight chi2 divides by. Full is the
   /// previous behaviour; MeasurementOnly is GenFit's; Unbiased is the correct
   /// one for a biased smoothed state. See detail::DafChiSquareDenominator.
+  /// GenFit's convergence tests; both tolerances default to 0 = disabled.
+  /// See DafFitterOptions for what each one means and why reproducing GenFit
+  /// means pValueConvergenceTolerance = 1 rather than something small.
+  double weightConvergenceTolerance = 0.;
+  std::size_t minAnnealingIterations = 1;
+  double pValueConvergenceTolerance = 0.;
+  double pValueMinimum = 0.;
+  std::size_t pValueMinIterations = 5;
+
+  /// GenFit's blowUpCov trio: reset off-diagonals, and clip the blown-up
+  /// variances. Angles get their own ceiling so a large scaling cannot push
+  /// them past the branch cut.
+  bool reseedResetOffDiagonals = false;
+  double reseedVarianceCeiling = 0.;
+  double reseedAngleVarianceCeiling = 0.;
+  bool referenceStartResetOffDiagonals = true;
+  double referenceStartVarianceCeiling = 1.e6;
+  double referenceStartAngleVarianceCeiling = 0.01;
+
+  /// GenFit's smoothing: backward filter combined with the forward one.
+  bool useTwoFilterSmoothing = false;
+  double twoFilterBlowUpFactor = 1000.;
+
+  /// GenFit's prepareTrack: piecewise reference, re-linearised around the
+  /// previous pass's smoothed states. No effect without referenceLinearization.
+  bool referencePiecewise = false;
+  bool referenceAnchorSmoothed = false;
+  bool referencePiecewiseSelfCheck = false;
+
   Acts::detail::DafChiSquareDenominator chiSquareDenominator =
       Acts::detail::DafChiSquareDenominator::Full;
 
@@ -320,20 +365,33 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     extensions.calibrator.template connect<&calibrator_t::calibrate>(
         &calibrator);
     using Denominator = Acts::detail::DafChiSquareDenominator;
+    // The chi2 and its Gaussian prefactor are connected together, with the same
+    // denominator, in every branch: they are the exponent and the normalisation
+    // of one density, and connecting them with different S would silently stop
+    // the ratio being one.
     switch (chiSquareDenominator) {
       case Denominator::MeasurementOnly:
         extensions.chiSquareCalculator
             .template connect<&Acts::detail::defaultDafChiSquareCalculator<
+                Acts::VectorMultiTrajectory, Denominator::MeasurementOnly>>();
+        extensions.logNormalization
+            .template connect<&Acts::detail::defaultDafLogNormalization<
                 Acts::VectorMultiTrajectory, Denominator::MeasurementOnly>>();
         break;
       case Denominator::Unbiased:
         extensions.chiSquareCalculator
             .template connect<&Acts::detail::defaultDafChiSquareCalculator<
                 Acts::VectorMultiTrajectory, Denominator::Unbiased>>();
+        extensions.logNormalization
+            .template connect<&Acts::detail::defaultDafLogNormalization<
+                Acts::VectorMultiTrajectory, Denominator::Unbiased>>();
         break;
       case Denominator::Full:
         extensions.chiSquareCalculator
             .template connect<&Acts::detail::defaultDafChiSquareCalculator<
+                Acts::VectorMultiTrajectory, Denominator::Full>>();
+        extensions.logNormalization
+            .template connect<&Acts::detail::defaultDafLogNormalization<
                 Acts::VectorMultiTrajectory, Denominator::Full>>();
         break;
     }
@@ -372,6 +430,33 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     dafOptions.referenceStartCovarianceScaling =
         referenceStartCovarianceScaling;
     dafOptions.useUnbiasedSmoothedState = useUnbiasedSmoothedState();
+    dafOptions.useCandidateNormalization = useCandidateNormalization();
+    dafOptions.weightConvergenceTolerance = weightConvergenceTolerance;
+    dafOptions.minIterations = minAnnealingIterations;
+    dafOptions.pValueConvergenceTolerance = pValueConvergenceTolerance;
+    dafOptions.pValueMinimum = pValueMinimum;
+    dafOptions.pValueMinIterations = pValueMinIterations;
+    dafOptions.referencePiecewise = referencePiecewise;
+    dafOptions.referenceAnchorSmoothed = referenceAnchorSmoothed;
+    dafOptions.referencePiecewiseSelfCheck = referencePiecewiseSelfCheck;
+    dafOptions.useTwoFilterSmoothing = useTwoFilterSmoothing;
+    dafOptions.twoFilterBlowUpFactor = twoFilterBlowUpFactor;
+    dafOptions.reseedResetOffDiagonals = reseedResetOffDiagonals;
+    dafOptions.reseedVarianceCeiling = reseedVarianceCeiling;
+    if (reseedAngleVarianceCeiling > 0.) {
+      dafOptions.reseedVarianceCeilings[Acts::eBoundPhi] =
+          reseedAngleVarianceCeiling;
+      dafOptions.reseedVarianceCeilings[Acts::eBoundTheta] =
+          reseedAngleVarianceCeiling;
+    }
+    dafOptions.referenceStartResetOffDiagonals = referenceStartResetOffDiagonals;
+    dafOptions.referenceStartVarianceCeiling = referenceStartVarianceCeiling;
+    if (referenceStartAngleVarianceCeiling > 0.) {
+      dafOptions.referenceStartVarianceCeilings[Acts::eBoundPhi] =
+          referenceStartAngleVarianceCeiling;
+      dafOptions.referenceStartVarianceCeilings[Acts::eBoundTheta] =
+          referenceStartAngleVarianceCeiling;
+    }
     if (stallStepsOverride() > 0) {
       dafOptions.stallStepLimit = stallStepsOverride();
     }
@@ -549,6 +634,15 @@ ActsExamples::makeDafFitterFunction(
     bool annealingCutOffPerCandidate,
     bool referenceLinearization,
     bool referenceWeightCalibration, double referenceStartCovarianceScaling,
+    bool referenceStartResetOffDiagonals, double referenceStartVarianceCeiling,
+    double referenceStartAngleVarianceCeiling,
+    double weightConvergenceTolerance, std::size_t minAnnealingIterations,
+    double pValueConvergenceTolerance, double pValueMinimum,
+    std::size_t pValueMinIterations, bool reseedResetOffDiagonals,
+    double reseedVarianceCeiling, double reseedAngleVarianceCeiling,
+    bool useTwoFilterSmoothing, double twoFilterBlowUpFactor,
+    bool referencePiecewise, bool referenceAnchorSmoothed,
+    bool referencePiecewiseSelfCheck,
     const Acts::Logger& logger) {
   // Stepper should be copied into the fitters. Keep a handle on the field
   // first: the direct-navigation branch needs it to size the seed curvature.
@@ -598,6 +692,19 @@ ActsExamples::makeDafFitterFunction(
   fitterFunction->maxIterations = maxIterations;
   fitterFunction->strawInitialWeightRadiusFactor =
       strawInitialWeightRadiusFactor;
+  fitterFunction->weightConvergenceTolerance = weightConvergenceTolerance;
+  fitterFunction->minAnnealingIterations = minAnnealingIterations;
+  fitterFunction->pValueConvergenceTolerance = pValueConvergenceTolerance;
+  fitterFunction->pValueMinimum = pValueMinimum;
+  fitterFunction->pValueMinIterations = pValueMinIterations;
+  fitterFunction->reseedResetOffDiagonals = reseedResetOffDiagonals;
+  fitterFunction->reseedVarianceCeiling = reseedVarianceCeiling;
+  fitterFunction->reseedAngleVarianceCeiling = reseedAngleVarianceCeiling;
+  fitterFunction->useTwoFilterSmoothing = useTwoFilterSmoothing;
+  fitterFunction->twoFilterBlowUpFactor = twoFilterBlowUpFactor;
+  fitterFunction->referencePiecewise = referencePiecewise;
+  fitterFunction->referenceAnchorSmoothed = referenceAnchorSmoothed;
+  fitterFunction->referencePiecewiseSelfCheck = referencePiecewiseSelfCheck;
   fitterFunction->useMomentMatchedCombiner = useMomentMatchedCombiner;
   fitterFunction->reseedCovarianceScaling = reseedCovarianceScaling;
   fitterFunction->chiSquareDenominator = chiSquareDenominator;
@@ -605,6 +712,12 @@ ActsExamples::makeDafFitterFunction(
   fitterFunction->referenceWeightCalibration = referenceWeightCalibration;
   fitterFunction->referenceStartCovarianceScaling =
       referenceStartCovarianceScaling;
+  fitterFunction->referenceStartResetOffDiagonals =
+      referenceStartResetOffDiagonals;
+  fitterFunction->referenceStartVarianceCeiling =
+      referenceStartVarianceCeiling;
+  fitterFunction->referenceStartAngleVarianceCeiling =
+      referenceStartAngleVarianceCeiling;
 
   return fitterFunction;
 }
