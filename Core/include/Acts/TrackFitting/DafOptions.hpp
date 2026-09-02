@@ -603,43 +603,20 @@ struct DafFitterOptions {
   /// running-state filter has at that point -- correctly placed, no double
   /// counting, and no inflation required.
   ///
-  /// It is, however, what makes a comparison against the running-state path
-  /// fair. That path inflates its re-seed covariance by reseedCovarianceScaling
-  /// on every pass; this path never sees that option, because it seeds its
-  /// reference propagation with a zero covariance and takes its prior from
-  /// here. Running one at 10 and the other at 1 is not an A/B of reference
-  /// linearisation, it is an A/B of the prior -- and a too-tight prior shows up
-  /// exactly where there are too few hits to overwhelm it, i.e. on short
-  /// tracks, which is where the 2026-08-22 comparison lost the most.
+  /// The reference path has NO blow-up options of its own: it uses the same
+  /// reseedCovarianceScaling / reseedResetOffDiagonals / reseedVarianceCeiling
+  /// / reseedVarianceCeilings the running-state path does, applied to whichever
+  /// prior a pass filters against (the first pass's seed covariance, and the
+  /// transported prior cached for passes 2..N).
   ///
-  /// Applies to both the seed covariance of the first pass and the transported
-  /// prior cached for passes 2..N. Scaling only the former would leave the
-  /// option with no effect on the passes that decide the fit.
-  double referenceStartCovarianceScaling = 1.;
-
-  /// The reference path's equivalents of the reseed blow-up controls, applied
-  /// to whichever prior a pass filters against. Defaults are GenFit's, from
-  /// AbsKalmanFitter.h:57 -- `resetOffDiagonals_(true), blowUpMaxVal_(1.E6)`.
-  ///
-  /// They only do anything once referenceStartCovarianceScaling != 1, since a
-  /// prior that is not inflated has nothing to clip. Keeping them at GenFit's
-  /// values means turning the scaling up cannot silently produce the
-  /// uncapped blow-up that made blowUpFactor=1000 unusable on the
-  /// running-state path.
-  ///
-  /// NOTE ON UNITS: GenFit works in cm, ACTS in mm, so GenFit's 1e6 is 1e8 in
-  /// ACTS units for the two position variances. 1e6 is kept here because it is
-  /// still ~50x above the largest eigenvalue this fit ever reaches (1.8e4), so
-  /// it does not bind either way -- but it is NOT a literal translation.
-  bool referenceStartResetOffDiagonals = true;
-  double referenceStartVarianceCeiling = 1.e6;
-
-  /// Per-parameter ceilings, overriding referenceStartVarianceCeiling where
-  /// non-zero. phi and theta need their own and much tighter one: ACTS bound
-  /// parameters are periodic, so past sigma ~ pi a prior is not flat but
-  /// meaningless. GenFit needs no equivalent -- its (q/p, u', v', u, v) plane
-  /// state has no periodic component at all.
-  std::array<double, eBoundSize> referenceStartVarianceCeilings{};
+  /// Sharing them is what makes a comparison between the two paths fair.
+  /// Running one at 10 and the other at 1000 is not an A/B of reference
+  /// linearisation, it is an A/B of the prior -- and a prior that is too tight
+  /// or too loose shows up exactly where there are too few hits to overwhelm
+  /// it, i.e. on short tracks, which is where the 2026-08-22 comparison lost
+  /// the most. Before 2026-09-01 the two families were separate and defaulted
+  /// differently (1000/reset-on against 10/reset-off), so every reference-vs-
+  /// running comparison before then carried that difference too.
 
   /// Drift-circle initial weighting on straw surfaces, as a multiple of the
   /// straw's radial cell spacing; 0 (the default) keeps the uniform 1/N start.

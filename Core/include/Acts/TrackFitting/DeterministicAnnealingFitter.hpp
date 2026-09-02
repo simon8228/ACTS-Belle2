@@ -1036,10 +1036,10 @@ class DeterministicAnnealingFitter {
     // then clip per parameter. A bare multiply would drive sigma(phi) and
     // sigma(theta) toward the branch cut as soon as the scaling is turned up.
     blowUpCovariance(referenceStartCovariance,
-                     dafOptions.referenceStartCovarianceScaling,
-                     dafOptions.referenceStartResetOffDiagonals,
-                     dafOptions.referenceStartVarianceCeiling,
-                     dafOptions.referenceStartVarianceCeilings);
+                     dafOptions.reseedCovarianceScaling,
+                     dafOptions.reseedResetOffDiagonals,
+                     dafOptions.reseedVarianceCeiling,
+                     dafOptions.reseedVarianceCeilings);
 
     // Which surface referenceStartCovariance is valid on, and whether it has
     // been replaced by the transported version cached after the first pass.
@@ -1338,7 +1338,7 @@ class DeterministicAnnealingFitter {
       ACTS_DEBUG("=== REFERENCE PRIOR for this pass: "
                  << (useCached ? "the cached transported prior"
                                : "the seed covariance")
-                 << ", scaled by " << dafOptions.referenceStartCovarianceScaling
+                 << ", scaled by " << dafOptions.reseedCovarianceScaling
                  << " -> tr = " << startPrior.trace()
                  << ", sqrt(diag) loc0=" << std::sqrt(std::max(0., startPrior(eBoundLoc0, eBoundLoc0)))
                  << " loc1=" << std::sqrt(std::max(0., startPrior(eBoundLoc1, eBoundLoc1)))
@@ -1665,10 +1665,10 @@ class DeterministicAnnealingFitter {
         // (reseedCovarianceScaling), so leaving this one unscaled is also what
         // made the two paths incomparable.
         blowUpCovariance(cachedStartCovariance,
-                         dafOptions.referenceStartCovarianceScaling,
-                         dafOptions.referenceStartResetOffDiagonals,
-                         dafOptions.referenceStartVarianceCeiling,
-                         dafOptions.referenceStartVarianceCeilings);
+                         dafOptions.reseedCovarianceScaling,
+                         dafOptions.reseedResetOffDiagonals,
+                         dafOptions.reseedVarianceCeiling,
+                         dafOptions.reseedVarianceCeilings);
         if (referenceStartSurface != nullptr) {
           referenceStartCovarianceCached = true;
           ACTS_DEBUG("=== REFERENCE PRIOR cached at "

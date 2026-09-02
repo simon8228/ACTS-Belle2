@@ -276,9 +276,6 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   bool reseedResetOffDiagonals = false;
   double reseedVarianceCeiling = 0.;
   double reseedAngleVarianceCeiling = 0.;
-  bool referenceStartResetOffDiagonals = true;
-  double referenceStartVarianceCeiling = 1.e6;
-  double referenceStartAngleVarianceCeiling = 0.01;
 
   /// GenFit's smoothing: backward filter combined with the forward one.
   bool useTwoFilterSmoothing = false;
@@ -306,8 +303,6 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
 
   /// Factor on the seed covariance the reference filter starts each pass from.
   /// Not GenFit's blowUpFactor -- see
-  /// DafFitterOptions::referenceStartCovarianceScaling for why 1e3 breaks here.
-  double referenceStartCovarianceScaling = 1.;
 
   std::vector<const Acts::Surface*> materialSurfaces;
 
@@ -427,8 +422,6 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     dafOptions.reseedCovarianceScaling = reseedCovarianceScaling;
     dafOptions.referenceLinearization = referenceLinearization;
     dafOptions.referenceWeightCalibration = referenceWeightCalibration;
-    dafOptions.referenceStartCovarianceScaling =
-        referenceStartCovarianceScaling;
     dafOptions.useUnbiasedSmoothedState = useUnbiasedSmoothedState();
     dafOptions.useCandidateNormalization = useCandidateNormalization();
     dafOptions.weightConvergenceTolerance = weightConvergenceTolerance;
@@ -448,14 +441,6 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
           reseedAngleVarianceCeiling;
       dafOptions.reseedVarianceCeilings[Acts::eBoundTheta] =
           reseedAngleVarianceCeiling;
-    }
-    dafOptions.referenceStartResetOffDiagonals = referenceStartResetOffDiagonals;
-    dafOptions.referenceStartVarianceCeiling = referenceStartVarianceCeiling;
-    if (referenceStartAngleVarianceCeiling > 0.) {
-      dafOptions.referenceStartVarianceCeilings[Acts::eBoundPhi] =
-          referenceStartAngleVarianceCeiling;
-      dafOptions.referenceStartVarianceCeilings[Acts::eBoundTheta] =
-          referenceStartAngleVarianceCeiling;
     }
     if (stallStepsOverride() > 0) {
       dafOptions.stallStepLimit = stallStepsOverride();
@@ -633,9 +618,7 @@ ActsExamples::makeDafFitterFunction(
     Acts::detail::DafChiSquareDenominator chiSquareDenominator,
     bool annealingCutOffPerCandidate,
     bool referenceLinearization,
-    bool referenceWeightCalibration, double referenceStartCovarianceScaling,
-    bool referenceStartResetOffDiagonals, double referenceStartVarianceCeiling,
-    double referenceStartAngleVarianceCeiling,
+    bool referenceWeightCalibration,
     double weightConvergenceTolerance, std::size_t minAnnealingIterations,
     double pValueConvergenceTolerance, double pValueMinimum,
     std::size_t pValueMinIterations, bool reseedResetOffDiagonals,
@@ -710,14 +693,6 @@ ActsExamples::makeDafFitterFunction(
   fitterFunction->chiSquareDenominator = chiSquareDenominator;
   fitterFunction->referenceLinearization = referenceLinearization;
   fitterFunction->referenceWeightCalibration = referenceWeightCalibration;
-  fitterFunction->referenceStartCovarianceScaling =
-      referenceStartCovarianceScaling;
-  fitterFunction->referenceStartResetOffDiagonals =
-      referenceStartResetOffDiagonals;
-  fitterFunction->referenceStartVarianceCeiling =
-      referenceStartVarianceCeiling;
-  fitterFunction->referenceStartAngleVarianceCeiling =
-      referenceStartAngleVarianceCeiling;
 
   return fitterFunction;
 }

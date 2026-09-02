@@ -103,10 +103,7 @@ void addTrackFitting(py::module& mex) {
            bool useTwoFilterSmoothing, double twoFilterBlowUpFactor,
            bool referencePiecewise, bool referenceAnchorSmoothed,
            bool referencePiecewiseSelfCheck, bool referenceLinearization, bool referenceWeightCalibration,
-           double referenceStartCovarianceScaling,
-           bool referenceStartResetOffDiagonals,
-           double referenceStartVarianceCeiling,
-           double referenceStartAngleVarianceCeiling, Logging::Level level) {
+           Logging::Level level) {
           // Spelled as a string rather than a bound enum so it survives as one
           // readable token from the command line down to the calculator. An
           // unrecognised value throws instead of falling back to the default:
@@ -135,9 +132,7 @@ void addTrackFitting(py::module& mex) {
               useMomentMatchedCombiner, reseedCovarianceScaling, denominator,
               annealingCutOffPerCandidate,
               referenceLinearization, referenceWeightCalibration,
-              referenceStartCovarianceScaling, referenceStartResetOffDiagonals,
-              referenceStartVarianceCeiling,
-              referenceStartAngleVarianceCeiling, weightConvergenceTolerance,
+              weightConvergenceTolerance,
               minAnnealingIterations, pValueConvergenceTolerance,
               pValueMinimum, pValueMinIterations, reseedResetOffDiagonals,
               reseedVarianceCeiling, reseedAngleVarianceCeiling,
@@ -168,10 +163,7 @@ void addTrackFitting(py::module& mex) {
         "referencePiecewiseSelfCheck"_a = false,
         "referenceLinearization"_a = false,
         "referenceWeightCalibration"_a = true,
-        "referenceStartCovarianceScaling"_a = 1.,
-        "referenceStartResetOffDiagonals"_a = true,
-        "referenceStartVarianceCeiling"_a = 1.e6,
-        "referenceStartAngleVarianceCeiling"_a = 0.01, "level"_a);
+        "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(
         mex, "MeasurementCalibrator");

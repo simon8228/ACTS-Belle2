@@ -671,10 +671,6 @@ def addMyDafFitter(
     referencePiecewiseSelfCheck: bool = False,
     referenceLinearization: bool = False,
     referenceWeightCalibration: bool = True,
-    referenceStartCovarianceScaling: float = 1.0,
-    referenceStartResetOffDiagonals: bool = True,
-    referenceStartVarianceCeiling: float = 1.0e6,
-    referenceStartAngleVarianceCeiling: float = 0.01,
 ) -> None:
     """DAF counterpart of addMyFitter: identical sequencer wiring (same input/output
     collection names and "tracks" whiteboard alias), but fits with the Deterministic
@@ -806,10 +802,6 @@ def addMyDafFitter(
             referencePiecewiseSelfCheck=referencePiecewiseSelfCheck,
             referenceLinearization=referenceLinearization,
             referenceWeightCalibration=referenceWeightCalibration,
-            referenceStartCovarianceScaling=referenceStartCovarianceScaling,
-            referenceStartResetOffDiagonals=referenceStartResetOffDiagonals,
-            referenceStartVarianceCeiling=referenceStartVarianceCeiling,
-            referenceStartAngleVarianceCeiling=referenceStartAngleVarianceCeiling,
             level=customLogLevel(),
         ),
         calibrator=calibrator,
