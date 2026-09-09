@@ -276,6 +276,84 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
     return kfOptions;
   }
 
+  /// Run the direct-navigation fit end to end: prepare the surface sequence,
+  /// size the propagator limits from the sequence actually being traversed,
+  /// fit, then extrapolate to the reference surface through material.
+  ///
+  /// Shared by the initial fit and the refit so an iterated fit repeats the
+  /// identical procedure. Before this was factored out the refit ran on plain
+  /// PropagatorPlainOptions, which differs in two ways that each cost hits or
+  /// accuracy: loop protection is back on there (capping the pass at half a
+  /// helix turn, truncating curlers -- see loopProtection() above), and the
+  /// reference surface was left set inside the direct fit, asking the
+  /// DirectNavigator to target a perigee outside its own sequence instead of
+  /// extrapolating to it afterwards with a MaterialInteractor.
+  ///
+  /// @param surfaceSequence taken by value: preparation reorders it in place.
+  TrackFitterResult fitDirect(
+      const std::vector<Acts::SourceLink>& sourceLinks,
+      const TrackParameters& initialParameters,
+      const GeneralFitterOptions& options,
+      const Acts::KalmanFitterOptions<Acts::VectorMultiTrajectory>& kfOptions,
+      std::vector<const Acts::Surface*> surfaceSequence,
+      TrackContainer& tracks) const {
+    const double sequenceSpan = prepareDirectNavigationSequence(
+        options.geoContext, initialParameters.position(options.geoContext),
+        initialParameters.direction(), surfaceSequence, materialSurfaces,
+        seedSignedRadius(initialParameters, options));
+
+    auto directKfOptions = kfOptions;
+    directKfOptions.referenceSurface = nullptr;
+
+    // Size the limit from the sequence actually being traversed. A fixed
+    // 1.5 m truncates curlers: one turn at 0.13 GeV in 1.5 T is already
+    // 1.8 m of arc, so the propagation aborted before reaching the outer
+    // hits and the track was dropped by the minMeasurements cut. The 1.5 m
+    // floor keeps well-behaved tracks exactly as before.
+    directKfOptions.propagatorPlainOptions.pathLimit =
+        std::max(1.5 * Acts::UnitConstants::m,
+                 1.5 * sequenceSpan + 0.5 * Acts::UnitConstants::m);
+    // ...and let that limit actually govern: Acts' loop protection would
+    // otherwise clamp the pass to half a helix turn regardless. See
+    // loopProtection() above.
+    directKfOptions.propagatorPlainOptions.loopProtection = loopProtection();
+    if (maxStepsOverride() > 0) {
+      directKfOptions.propagatorPlainOptions.maxSteps = maxStepsOverride();
+    }
+
+    auto result = directFitter.fit(sourceLinks.begin(), sourceLinks.end(),
+                                   initialParameters, directKfOptions,
+                                   surfaceSequence, tracks);
+    if (result.ok() && options.referenceSurface != nullptr) {
+      // The perigee lies inside the innermost measurement, so this
+      // extrapolation crosses the CDC inner wall, the SVD, the PXD and the
+      // beam pipe. Without a MaterialInteractor the covariance is
+      // transported through all of it with no multiple scattering added,
+      // and the reported perigee covariance comes out too small -- most
+      // visibly in phi, whose fit uncertainty is the smallest of the six so
+      // the missing term dominates it. Measured 2026-08-22: the implied
+      // missing term scales as 1/p with a constant 3.3 mrad*GeV, i.e.
+      // Highland for ~7% X0, and adding it in quadrature reproduces
+      // GenFit's sigma_phi exactly.
+      //
+      // Scattering and energy loss follow the fit's own switches, so a
+      // no-material fit does not silently acquire material here.
+      Propagator::Options<Acts::ActorList<Acts::MaterialInteractor>>
+          extrapolationOptions(options.geoContext, options.magFieldContext);
+      auto& matInteractor = extrapolationOptions.actorList
+                                .template get<Acts::MaterialInteractor>();
+      matInteractor.multipleScattering = multipleScattering;
+      matInteractor.energyLoss = energyLoss;
+      auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
+          result.value(), *options.referenceSurface, referencePropagator,
+          extrapolationOptions, kfOptions.referenceSurfaceStrategy);
+      if (!extrapolationResult.ok()) {
+        return extrapolationResult.error();
+      }
+    }
+    return result;
+  }
+
   TrackFitterResult operator()(const std::vector<Acts::SourceLink>& sourceLinks,
                                const TrackParameters& initialParameters,
                                const GeneralFitterOptions& options,
@@ -295,61 +373,8 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
         surfaceSequence.push_back(surface);
       }
       if (allResolved) {
-        const double sequenceSpan = prepareDirectNavigationSequence(
-            options.geoContext, initialParameters.position(options.geoContext),
-            initialParameters.direction(), surfaceSequence, materialSurfaces,
-            seedSignedRadius(initialParameters, options));
-
-        auto directKfOptions = kfOptions;
-        directKfOptions.referenceSurface = nullptr;
-
-        // Size the limit from the sequence actually being traversed. A fixed
-        // 1.5 m truncates curlers: one turn at 0.13 GeV in 1.5 T is already
-        // 1.8 m of arc, so the propagation aborted before reaching the outer
-        // hits and the track was dropped by the minMeasurements cut. The 1.5 m
-        // floor keeps well-behaved tracks exactly as before.
-        directKfOptions.propagatorPlainOptions.pathLimit =
-            std::max(1.5 * Acts::UnitConstants::m,
-                     1.5 * sequenceSpan + 0.5 * Acts::UnitConstants::m);
-        // ...and let that limit actually govern: Acts' loop protection would
-        // otherwise clamp the pass to half a helix turn regardless. See
-        // loopProtection() above.
-        directKfOptions.propagatorPlainOptions.loopProtection = loopProtection();
-        if (maxStepsOverride() > 0) {
-          directKfOptions.propagatorPlainOptions.maxSteps = maxStepsOverride();
-        }
-
-        auto result = directFitter.fit(sourceLinks.begin(), sourceLinks.end(),
-                                       initialParameters, directKfOptions,
-                                       surfaceSequence, tracks);
-        if (result.ok() && options.referenceSurface != nullptr) {
-          // The perigee lies inside the innermost measurement, so this
-          // extrapolation crosses the CDC inner wall, the SVD, the PXD and the
-          // beam pipe. Without a MaterialInteractor the covariance is
-          // transported through all of it with no multiple scattering added,
-          // and the reported perigee covariance comes out too small -- most
-          // visibly in phi, whose fit uncertainty is the smallest of the six so
-          // the missing term dominates it. Measured 2026-08-22: the implied
-          // missing term scales as 1/p with a constant 3.3 mrad*GeV, i.e.
-          // Highland for ~7% X0, and adding it in quadrature reproduces
-          // GenFit's sigma_phi exactly.
-          //
-          // Scattering and energy loss follow the fit's own switches, so a
-          // no-material fit does not silently acquire material here.
-          Propagator::Options<Acts::ActorList<Acts::MaterialInteractor>>
-              extrapolationOptions(options.geoContext, options.magFieldContext);
-          auto& matInteractor = extrapolationOptions.actorList
-                                    .template get<Acts::MaterialInteractor>();
-          matInteractor.multipleScattering = multipleScattering;
-          matInteractor.energyLoss = energyLoss;
-          auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
-              result.value(), *options.referenceSurface, referencePropagator,
-              extrapolationOptions, kfOptions.referenceSurfaceStrategy);
-          if (!extrapolationResult.ok()) {
-            return extrapolationResult.error();
-          }
-        }
-        return result;
+        return fitDirect(sourceLinks, initialParameters, options, kfOptions,
+                         std::move(surfaceSequence), tracks);
       }
     }
     return fitter.fit(sourceLinks.begin(), sourceLinks.end(), initialParameters,
@@ -364,9 +389,15 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
       const std::vector<const Acts::Surface*>& surfaceSequence,
       TrackContainer& tracks) const override {
     const auto kfOptions = makeKfOptions(options, calibrator);
-    return directFitter.fit(sourceLinks.begin(), sourceLinks.end(),
-                            initialParameters, kfOptions, surfaceSequence,
-                            tracks);
+    // The sequence handed in was rebuilt from the input track's own states, so
+    // it is already in traversal order and already carries the material
+    // surfaces the previous pass stopped at. Running it through the same
+    // preparation anyway is what keeps an iterated fit walking the identical
+    // sequence every pass: it re-injects anything the previous pass did not
+    // record, drops the duplicates that creates, and reorders along the
+    // *re-seeded* helix rather than the original one.
+    return fitDirect(sourceLinks, initialParameters, options, kfOptions,
+                     surfaceSequence, tracks);
   }
 };
 

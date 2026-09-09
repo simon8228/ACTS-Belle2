@@ -533,11 +533,25 @@ class DeterministicAnnealingFitter {
                                                    << ":" << ss.str());
       }
       // Read before the new weights overwrite the old ones.
+      //
+      // The PRODUCT below is what underflows, not the subtraction above it.
+      // FE_UNDERFLOW needs a result that is both tiny and INEXACT: the
+      // difference of two nearby weights is exact by Sterbenz's lemma and
+      // never raises, but w * chi2 for a rejected candidate (w ~ 1e-308) and a
+      // small chi2 lands at ~1e-311 inexactly and does. The FPE monitor treats
+      // that as an error and aborts the whole job.
+      //
+      // Skipping the term is exact to the precision that matters: it shifts
+      // weightedChi2 by at most 1e-300 * chi2, and that sum only ever feeds a
+      // p-value and the DEBUG log.
+      constexpr double kNegligibleWeight = 1e-300;
       for (std::size_t i = 0; i < weights.size(); ++i) {
         summary.maxAbsWeightChange =
             std::max(summary.maxAbsWeightChange,
                      std::abs(weights[i] - candState.weights[i]));
-        summary.weightedChi2 += weights[i] * chi2s[i];
+        if (std::abs(weights[i]) >= kNegligibleWeight) {
+          summary.weightedChi2 += weights[i] * chi2s[i];
+        }
       }
       summary.ndf += static_cast<double>(ts.calibratedSize());
 

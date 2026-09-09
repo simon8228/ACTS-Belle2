@@ -135,7 +135,6 @@ ProcessCode RefittingAlgorithm::execute(const AlgorithmContext& ctx) const {
                    << ctx.eventNumber << " track " << itrack << " with error: "
                    << result.error() << ", " << result.error().message());
     }
-    ++itrack;
   }
 
   ACTS_DEBUG("Fitted tracks: " << trackContainer->size());

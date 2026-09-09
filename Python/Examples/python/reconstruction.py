@@ -595,7 +595,41 @@ def addMyFitter(
     chi2CutOff: float = float("inf"),
     directNavigation: bool = False,
     maxSteps: int = 5000,
+    iterations: int = 1,
+    initialVarInflation: Optional[List[float]] = None,
 ) -> None:
+    """Add a Kalman fit, optionally iterated.
+
+    `iterations` counts the total number of Kalman passes over the track.
+    1 (the default) is the plain single-pass fit and behaves exactly as
+    before. N > 1 appends N-1 RefittingAlgorithm stages, each of which
+    re-seeds from the previous pass's fitted parameters at the perigee,
+    inflates that covariance by `initialVarInflation`, and refits over the
+    surface sequence rebuilt from the previous pass's own track states.
+    Only the last stage's output is published as "tracks".
+
+    Two things this is NOT, worth knowing before reading the numbers:
+
+    * The iteration is a front-restart -- every pass runs in the same
+      direction from the innermost surface. GenFit's iterated KF instead
+      alternates direction (KalmanFitter.cc:194/:267), blowing the
+      covariance up at whichever end it just finished on. So N passes here
+      are not GenFit's N passes even at matched inflation.
+    * The measurements are not recalibrated between passes.
+      RefittingCalibrator copies the calibrated measurement off the previous
+      track state verbatim, so the drift distance and its resolution stay
+      frozen at whatever the first pass used. Iterating updates the
+      trajectory, not the x-t evaluation.
+
+    `initialVarInflation` is a plain per-diagonal multiply on the re-seed
+    covariance (default: no inflation). Note it does *not* reset the
+    off-diagonals or apply a ceiling, unlike GenFit's blowUpCov and unlike
+    the DAF's own blowUpCovariance: a large factor leaves the previous
+    pass's correlations in place at a proportionally reduced strength.
+    """
+    if iterations < 1:
+        raise ValueError(f"iterations must be >= 1, got {iterations}")
+
     customLogLevel = acts.examples.defaultLogging(s, logLevel)
 
     kalmanOptions = {
@@ -608,22 +642,57 @@ def addMyFitter(
         "chi2Cut": chi2CutOff,
         "directNavigation": directNavigation,
     }
+    # One fitter function object shared by every pass, so the iterations
+    # cannot drift apart in configuration.
+    fitFunction = acts.examples.makeKalmanFitterFunction(
+        trackingGeometry, field, **kalmanOptions
+    )
+
+    finalTracks = "kf_tracks"
     fitAlg = acts.examples.TrackFittingAlgorithm(
         level=customLogLevel(),
         inputMeasurements="measurements",
         inputProtoTracks=inputProtoTracks,
         inputInitialTrackParameters="estimatedparameters",
         inputClusters=clusters if clusters is not None else "",
-        outputTracks="kf_tracks",
+        outputTracks=finalTracks if iterations == 1 else "kf_tracks_iter0",
         pickTrack=-1,
         maxSteps=maxSteps,
-        fit=acts.examples.makeKalmanFitterFunction(
-            trackingGeometry, field, **kalmanOptions
-        ),
+        fit=fitFunction,
         calibrator=calibrator,
     )
     s.addAlgorithm(fitAlg)
-    s.addWhiteboardAlias("tracks", fitAlg.config.outputTracks)
+
+    inflation = (
+        [1.0] * 6 if initialVarInflation is None else list(initialVarInflation)
+    )
+    if len(inflation) != 6:
+        raise ValueError(
+            f"initialVarInflation must have 6 entries, got {len(inflation)}"
+        )
+
+    previous = fitAlg.config.outputTracks
+    for iteration in range(1, iterations):
+        # The last pass writes the published name so downstream stages need
+        # no knowledge of how many iterations ran.
+        output = (
+            finalTracks
+            if iteration == iterations - 1
+            else f"kf_tracks_iter{iteration}"
+        )
+        s.addAlgorithm(
+            acts.examples.RefittingAlgorithm(
+                level=customLogLevel(),
+                inputTracks=previous,
+                outputTracks=output,
+                pickTrack=-1,
+                initialVarInflation=inflation,
+                fit=fitFunction,
+            )
+        )
+        previous = output
+
+    s.addWhiteboardAlias("tracks", previous)
 
     return s
 

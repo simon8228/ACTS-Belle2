@@ -810,7 +810,7 @@ std::vector<ProtoLayerSurfaces> Gen3Belle2Builder::buildCDCLayers(
         cylTransform, cylBounds);
     Acts::BinUtility bu(1, -M_PI, M_PI, Acts::closed,
                         Acts::AxisDirection::AxisPhi);
-    bu += Acts::BinUtility(40, -halfZ, halfZ, Acts::open,
+    bu += Acts::BinUtility(500, -halfZ, halfZ, Acts::open,
                            Acts::AxisDirection::AxisZ);
     passiveSurf->assignSurfaceMaterial(
         std::make_shared<Acts::ProtoSurfaceMaterial>(bu));
