@@ -160,6 +160,20 @@ bool loopProtection() {
   }();
   return value;
 }
+
+/// Energy loss on the extrapolation from the first hit to the perigee,
+/// switched separately from the fit's: ACTS_O2_ENERGY_LOSS=0 turns it off, =1
+/// on, and unset follows the fit's own energyLoss flag as before. The fit and
+/// this extrapolation otherwise share one switch, so an energyLoss=False run
+/// cannot tell which of the two leaves the ~0.7 MeV momentum offset
+/// (FIT_CHANGES Q12).
+bool extrapolationEnergyLoss(bool fitEnergyLoss) {
+  static const int value = [] {
+    const char* env = std::getenv("ACTS_O2_ENERGY_LOSS");
+    return env == nullptr ? -1 : (std::atoi(env) != 0 ? 1 : 0);
+  }();
+  return value < 0 ? fitEnergyLoss : value == 1;
+}
 }  // namespace
 
 using namespace ActsExamples;
@@ -338,12 +352,14 @@ struct KalmanFitterFunctionImpl final : public TrackFitterFunction {
       //
       // Scattering and energy loss follow the fit's own switches, so a
       // no-material fit does not silently acquire material here.
+      // ACTS_O2_ENERGY_LOSS overrides the energy loss alone (see
+      // extrapolationEnergyLoss).
       Propagator::Options<Acts::ActorList<Acts::MaterialInteractor>>
           extrapolationOptions(options.geoContext, options.magFieldContext);
       auto& matInteractor = extrapolationOptions.actorList
                                 .template get<Acts::MaterialInteractor>();
       matInteractor.multipleScattering = multipleScattering;
-      matInteractor.energyLoss = energyLoss;
+      matInteractor.energyLoss = extrapolationEnergyLoss(energyLoss);
       auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
           result.value(), *options.referenceSurface, referencePropagator,
           extrapolationOptions, kfOptions.referenceSurfaceStrategy);

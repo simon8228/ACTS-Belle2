@@ -645,7 +645,7 @@ void Gen3Belle2Builder::buildCDC(Acts::Experimental::BlueprintNode& parent,
   auto cdcLayers = buildCDCLayers(gctx);
 
   auto cdcBounds =
-      std::make_shared<Acts::CylinderVolumeBounds>(150_mm, 3000_mm, 3000_mm);
+      std::make_shared<Acts::CylinderVolumeBounds>(160_mm, 3000_mm, 3000_mm);
 
   struct TrackingVolumeAccessor
       : public Acts::Experimental::StaticBlueprintNode {
@@ -842,8 +842,13 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
 
   std::vector<double> z_ranges = {140.0_mm, 300.0_mm, 400.0_mm, 500.0_mm};
 
+  // rMax 160 (was 150) so SVD_suppLayer3 (r = 155, volume 154-156) lies
+  // inside this container. At 150 its layer volume sat in the CDC container's
+  // range and the navigator never entered it: its 0.0035 X0 was skipped by
+  // every track (FIT_CHANGES G4). The CDC container starts at 160 to match;
+  // its first layer volume starts at 163.5.
   auto svdBounds =
-      std::make_shared<Acts::CylinderVolumeBounds>(30_mm, 150_mm, 3000_mm);
+      std::make_shared<Acts::CylinderVolumeBounds>(30_mm, 160_mm, 3000_mm);
 
   Acts::Transform3 transformationZL6 = Acts::Transform3::Identity();
   transformationZL6.translation() = Acts::Vector3(0_mm, 0_mm, z_positionL6);
@@ -892,7 +897,12 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
           svdVol.addLayer("SVD_suppLayer2", [&](auto& suppLayer) {
             Acts::Transform3 t = Acts::Transform3::Identity();
             t.translation() = Acts::Vector3(0, 0, 50_mm);
-            auto bounds = std::make_shared<Acts::CylinderBounds>(110_mm, 130);
+            // r = 118 (was 110): at 110 this layer's volume (109-111) lay
+            // inside SVD_Layer5's (98.8-116.8), so the navigator, being in
+            // SVD_Layer5, never tried this surface (FIT_CHANGES G4). L5's
+            // sensors span r 103.8-111.8, so no envelope separates the two;
+            // the material moves 8 mm out instead, clear of L5 and L6 (130).
+            auto bounds = std::make_shared<Acts::CylinderBounds>(118_mm, 130);
             auto surf = Acts::Surface::makeShared<Acts::CylinderSurface>(t, bounds);
             Acts::BinUtility bu(72, -M_PI, M_PI, Acts::closed,
                                 Acts::AxisDirection::AxisPhi);
@@ -969,8 +979,12 @@ void Gen3Belle2Builder::buildSVD(Acts::Experimental::BlueprintNode& parent,
             svdVol.addLayer(name, [&](auto& layer) {
               layer.setProtoLayer(svdLayers[i].protoLayer);
 
+              // Layer 3 gets a 2 mm inner envelope (was 5): with 5 its volume
+              // started at r 33.8 and swallowed SVD_suppLayer1's (34-36), so
+              // a track saw one of the two, never both (FIT_CHANGES G4).
+              const double rIn = (i == 0) ? 2_mm : 5_mm;
               layer.setEnvelope(
-                  Acts::ExtentEnvelope{{.z = {5_mm, 5_mm}, .r = {5_mm, 5_mm}}});
+                  Acts::ExtentEnvelope{{.z = {5_mm, 5_mm}, .r = {rIn, 5_mm}}});
               layer.setNavigationPolicyFactory(createNavigationPolicy2());
             });
           }

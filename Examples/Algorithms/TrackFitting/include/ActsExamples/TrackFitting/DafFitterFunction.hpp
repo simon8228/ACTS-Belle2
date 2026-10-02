@@ -56,6 +56,8 @@ class DafFitterFunction {
   /// @param candidateTrace optional out-parameter; when non-null the fitter
   /// appends one entry per annealing pass, giving the whole weight history
   /// rather than just its endpoint (see DafFitterOptions::candidateTrace)
+  /// @param fitStatus optional out-parameter; when non-null the fitter records
+  /// how the fit ended (see DafFitterOptions::fitStatus)
   virtual TrackFitterResult operator()(
       const std::unordered_map<const Acts::Surface*, Acts::DafMeasurementGroup>&
           measurementGroups,
@@ -63,7 +65,8 @@ class DafFitterFunction {
       const TrackParameters&, const GeneralFitterOptions&,
       const MeasurementCalibratorAdapter&, TrackContainer&,
       Acts::DafCandidateMap* finalCandidateState = nullptr,
-      Acts::DafCandidateTrace* candidateTrace = nullptr) const = 0;
+      Acts::DafCandidateTrace* candidateTrace = nullptr,
+      Acts::DafFitStatus* fitStatus = nullptr) const = 0;
 };
 
 /// Makes a fitter function object for the Deterministic Annealing Filter
@@ -114,6 +117,7 @@ std::shared_ptr<DafFitterFunction> makeDafFitterFunction(
     double twoFilterBlowUpFactor = 1000.,
     bool referencePiecewise = false, bool referenceAnchorSmoothed = false,
     bool referencePiecewiseSelfCheck = false,
+    bool blowUpInitialSeed = false,
     const Acts::Logger& logger = *Acts::getDefaultLogger(
         "Daf", Acts::Logging::INFO));
 

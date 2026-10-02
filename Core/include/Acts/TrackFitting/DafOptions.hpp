@@ -127,6 +127,13 @@ struct DafCandidateState {
   std::vector<double> weights;
   /// Most recent chi2 of each candidate, same order as candidates
   std::vector<double> chi2;
+  /// Set on the exported final state only: the result-producing pass never
+  /// turned this surface into a calibrated track state (the propagation ended
+  /// before it or the direct navigator stepped past it). Its weights are then
+  /// 0 and the surface counts as an outlier on the track. Before this flag
+  /// such a surface kept its 1/N seed weight with chi2 0, indistinguishable
+  /// from a balanced left/right decision, and no counter saw it.
+  bool unreached = false;
   /// Smoothed local0 of the track itself on this surface, from the pass that
   /// produced the current weights -- i.e. where the fit thinks it crossed
   /// this wire, in the same coordinate the candidates are expressed in.
@@ -175,6 +182,31 @@ struct DafCandidateState {
 using DafCandidateMap = std::unordered_map<const Surface*, DafCandidateState>;
 
 /// What one weight-update pass observed, for the convergence tests.
+/// How one DAF fit ended -- GenFit's KalmanFitStatus convergence flags in
+/// ACTS terms, so a caller can treat the fits basf2 would not keep the way
+/// basf2 does.
+///
+/// basf2 builds a Track only from a fit GenFit calls converged
+/// (RecoTrack::wasFitSuccessful requires isFitConverged()), and GenFit's DAF
+/// calls a fit unconverged when a pass fails or the pass limit is reached
+/// before the weights settle. Here a failed pass is `salvaged`: the fitter
+/// replays the last good pass instead of failing (see salvage() in
+/// DeterministicAnnealingFitter), and the result looks like any other track.
+/// With `salvagedFromPass == 0` that replay used the flat 1/N seed weights,
+/// so the track carries no left/right information at all.
+struct DafFitStatus {
+  /// Passes attempted, the failed one included.
+  std::size_t nPasses = 0;
+  /// A convergence test (weights, or the p-value fallback) fired and the
+  /// final pass ran on the converged weights. False when the pass limit was
+  /// reached first, and on every salvaged fit.
+  bool converged = false;
+  /// A pass failed and the returned track replays an earlier one.
+  bool salvaged = false;
+  /// Zero-based index of the replayed pass; -1 when not salvaged.
+  int salvagedFromPass = -1;
+};
+
 struct DafPassSummary {
   /// Largest absolute weight change over every candidate on every surface --
   /// GenFit's maxAbsChange in DAF::calcWeights, its primary convergence
@@ -478,6 +510,17 @@ struct DafFitterOptions {
   /// additionally resets the off-diagonals, which is not done here.
   double reseedCovarianceScaling = 1.;
 
+  /// Blow up the caller's seed covariance before the FIRST pass too, with the
+  /// same treatment every later re-seed gets (reseedCovarianceScaling,
+  /// reseedResetOffDiagonals, reseedVarianceCeiling(s)). GenFit does this:
+  /// KalmanFitterRefTrack starts iteration 1 from getCovSeed() through
+  /// blowUpCov(blowUpFactor_, ...). Off, pass 0 filters against the seed
+  /// covariance as given, which on the CDC finder's seeds quotes sigma(theta)
+  /// ~0.03 rad on tracks whose seed theta is 0.4-0.65 rad off (FIT_CHANGES
+  /// Q20). Ignored by the reference-linearised path, which already blows up
+  /// its own start covariance.
+  bool blowUpInitialSeed = false;
+
   /// Linearise about a reference trajectory instead of about the running
   /// filtered state -- GenFit's KalmanFitterRefTrack rather than its plain
   /// KalmanFitter, which is what GenFit's own DAF runs.
@@ -656,6 +699,42 @@ struct DafFitterOptions {
   std::function<std::vector<const Surface*>(const BoundTrackParameters&)>
       rebuildSequence;
 
+  /// One surface the previous pass actually reached, as handed to
+  /// resortSequence: where along that pass's propagation it was reached, and
+  /// the smoothed track there.
+  struct ReachedSurface {
+    const Surface* surface = nullptr;
+    /// Path length at which the pass reached the surface, counted from where
+    /// that pass started.
+    double pathLength = 0.;
+    /// Smoothed track parameters on the surface.
+    BoundTrackParameters parameters;
+  };
+
+  /// Optional hook to re-order the DirectNavigator sequence between passes
+  /// from the TRAJECTORY the previous pass actually propagated, GenFit-style,
+  /// instead of from any analytic helix of a seed.
+  ///
+  /// rebuildSequence above still derives the order from one helix of the
+  /// re-seeded parameters: uniform field, no energy loss, one theta for the
+  /// whole track. For a curler, or a seed whose theta is badly off, that helix
+  /// places surfaces -- stereo straws especially, whose crossing depends on z
+  /// -- where the track is not, and the direct navigator then steps past them
+  /// for good. GenFit's KalmanFitterRefTrack orders its points by the
+  /// accumulated path of the real propagation and re-sorts until stable.
+  ///
+  /// Called after every pass that is followed by another, with the sequence
+  /// that pass navigated and the surfaces it reached (measurement and material
+  /// states, in trajectory order). Whatever it returns is navigated by the
+  /// next pass. The same rule as for rebuildSequence applies: the result must
+  /// contain every measurement-group surface, or it is refused and the
+  /// previous sequence kept. Takes precedence over rebuildSequence when both
+  /// are set. Unset (the default) changes nothing.
+  std::function<std::vector<const Surface*>(
+      const std::vector<const Surface*>& previousSequence,
+      const std::vector<ReachedSurface>& reached)>
+      resortSequence;
+
   /// Optional out-parameter: when non-null, the fitter copies the final
   /// per-surface candidate state (weights/chi2 as consumed by the pass that
   /// produced the returned track, including a salvaged one) into it. The
@@ -671,6 +750,12 @@ struct DafFitterOptions {
   /// candidate map per pass is only worth it when something is going to plot
   /// it.
   DafCandidateTrace* candidateTrace = nullptr;
+
+  /// Optional out-parameter: when non-null, the fitter records how the fit
+  /// ended (converged, pass limit, salvaged and from which pass). Left
+  /// untouched when the fit fails outright. Same "set it after construction"
+  /// pattern as finalCandidateState.
+  DafFitStatus* fitStatus = nullptr;
 };
 
 /// @}

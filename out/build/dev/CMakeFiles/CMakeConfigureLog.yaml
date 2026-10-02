@@ -383,3 +383,353 @@ events:
         
       exitCode: 1
 ...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-zWWHnP"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-zWWHnP"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-zWWHnP
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_980d1 && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_980d1.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_980d1.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_980d1.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-CMHgrT"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-CMHgrT"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-CMHgrT
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_842d6 && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_842d6.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_842d6.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_842d6.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-E6RR90"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-E6RR90"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-E6RR90
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_a12c9 && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_a12c9.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_a12c9.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_a12c9.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-CndgLa"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-CndgLa"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-CndgLa
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_182ca && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_182ca.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_182ca.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_182ca.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-uZAyRV"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-uZAyRV"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-uZAyRV
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_9c113 && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_9c113.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_9c113.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_9c113.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-kGbfAa"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-kGbfAa"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-kGbfAa
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_3929f && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_3929f.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_3929f.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_3929f.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-SxO318"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-SxO318"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-SxO318
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_00f62 && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_00f62.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_00f62.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_00f62.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-h77c2a"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-h77c2a"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-h77c2a
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_c55ce && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_c55ce.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_c55ce.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_c55ce.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-t7Hl49"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-t7Hl49"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-t7Hl49
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_022a6 && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_022a6.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_022a6.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_022a6.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "cmake/ActsCompilerOptions.cmake:83 (try_compile)"
+      - "CMakeLists.txt:255 (include)"
+    checks:
+      - "Checking C++20 std::format support"
+    directories:
+      source: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-6TJenU"
+      binary: "/home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-6TJenU"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference "
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/sweber/acts/ACTS-Belle2/cmake"
+    buildResult:
+      variable: "HAVE_STDFORMAT"
+      cached: true
+      stdout: |
+        Change Dir: /home/sweber/acts/ACTS-Belle2/out/build/dev/CMakeFiles/CMakeScratch/TryCompile-6TJenU
+        
+        Run Build Command(s):/tools/Xilinx/2025.1/Vivado/bin/ninja -v cmTC_546c8 && [1/2] /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_546c8.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        FAILED: CMakeFiles/cmTC_546c8.dir/format.cpp.o 
+        /usr/bin/c++   -Wall -Wextra -Wpedantic -Wshadow -Wzero-as-null-pointer-constant -Wold-style-cast -Woverloaded-virtual -D_GLIBCXX_ASSERTIONS -D_LIBCPP_DEBUG -Wnull-dereference   -std=gnu++20 -o CMakeFiles/cmTC_546c8.dir/format.cpp.o -c /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp
+        /home/sweber/acts/ACTS-Belle2/cmake/src/format.cpp:9:10: fatal error: format: No such file or directory
+            9 | #include <format>
+              |          ^~~~~~~~
+        compilation terminated.
+        ninja: build stopped: subcommand failed.
+        
+      exitCode: 1
+...

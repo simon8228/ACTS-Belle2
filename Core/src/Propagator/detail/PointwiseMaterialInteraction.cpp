@@ -11,7 +11,27 @@
 #include "Acts/Material/ISurfaceMaterial.hpp"
 #include "Acts/Material/Interactions.hpp"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace Acts {
+
+namespace {
+/// Energy-loss fluctuation model for the q/p noise. Unset (default): the
+/// Gaussian with the Landau FWHM (computeEnergyLossLandauSigmaQOverP).
+/// ACTS_ELOSS_NOISE=geant3: the GEANT3/GenFit variance including the tail of
+/// large energy transfers (computeEnergyLossGeant3SigmaQOverP), several times
+/// larger per crossing; what GenFit adds, so ACTS-vs-GenFit sigma(q/p) can be
+/// compared like for like (FIT_CHANGES Q18).
+bool useGeant3EnergyLossNoise() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_ELOSS_NOISE");
+    return env != nullptr && std::strcmp(env, "geant3") == 0;
+  }();
+  return value;
+}
+}  // namespace
+
 
 MaterialUpdateMode detail::determineMaterialUpdateMode(
     const Surface& surface, const Surface* startSurface,
@@ -75,7 +95,9 @@ detail::PointwiseMaterialEffects detail::computeMaterialEffects(
     }
     if (energyLoss) {
       const double sigmaQoverP =
-          computeEnergyLossLandauSigmaQOverP(slab, mass, qOverP, absQ);
+          useGeant3EnergyLossNoise()
+              ? computeEnergyLossGeant3SigmaQOverP(slab, mass, qOverP, absQ)
+              : computeEnergyLossLandauSigmaQOverP(slab, mass, qOverP, absQ);
       result.varianceQoverP = sigmaQoverP * sigmaQoverP;
     }
   }

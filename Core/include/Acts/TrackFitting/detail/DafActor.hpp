@@ -15,6 +15,7 @@
 #include "Acts/EventData/SourceLink.hpp"
 #include "Acts/EventData/detail/CorrectedTransformationFreeToBound.hpp"
 #include "Acts/Geometry/GeometryContext.hpp"
+#include "Acts/Propagator/DirectNavigator.hpp"
 #include "Acts/Propagator/StandardAborters.hpp"
 #include "Acts/Material/ISurfaceMaterial.hpp"
 #include "Acts/Propagator/detail/PointwiseMaterialInteraction.hpp"
@@ -260,6 +261,20 @@ class DafActor {
                  << " dir: " << stepper.direction(state.stepping).transpose()
                  << " momentum: "
                  << stepper.absoluteMomentum(state.stepping));
+
+    // ACTS_DN_HELIX_RANK: hand the direct navigator the local bending,
+    // q/p * B, for ranking its look-ahead candidates along the helix.
+    if constexpr (requires { state.navigation.qopField; }) {
+      if (detail::directNavigatorHelixRank()) {
+        auto field =
+            stepper.getField(state.stepping, stepper.position(state.stepping));
+        if (field.ok()) {
+          state.navigation.qopField =
+              stepper.qOverP(state.stepping) * (*field);
+          state.navigation.hasQopField = true;
+        }
+      }
+    }
 
     if (result.pathLimitReached.internalLimit ==
         std::numeric_limits<double>::max()) {

@@ -103,7 +103,7 @@ void addTrackFitting(py::module& mex) {
            bool useTwoFilterSmoothing, double twoFilterBlowUpFactor,
            bool referencePiecewise, bool referenceAnchorSmoothed,
            bool referencePiecewiseSelfCheck, bool referenceLinearization, bool referenceWeightCalibration,
-           Logging::Level level) {
+           bool blowUpInitialSeed, Logging::Level level) {
           // Spelled as a string rather than a bound enum so it survives as one
           // readable token from the command line down to the calculator. An
           // unrecognised value throws instead of falling back to the default:
@@ -138,7 +138,7 @@ void addTrackFitting(py::module& mex) {
               reseedVarianceCeiling, reseedAngleVarianceCeiling,
               useTwoFilterSmoothing, twoFilterBlowUpFactor,
               referencePiecewise, referenceAnchorSmoothed,
-              referencePiecewiseSelfCheck,
+              referencePiecewiseSelfCheck, blowUpInitialSeed,
               *getDefaultLogger("Daf", level));
         },
         "trackingGeometry"_a, "magneticField"_a, "multipleScattering"_a,
@@ -163,6 +163,7 @@ void addTrackFitting(py::module& mex) {
         "referencePiecewiseSelfCheck"_a = false,
         "referenceLinearization"_a = false,
         "referenceWeightCalibration"_a = true,
+        "blowUpInitialSeed"_a = false,
         "level"_a);
 
     py::class_<MeasurementCalibrator, std::shared_ptr<MeasurementCalibrator>>(

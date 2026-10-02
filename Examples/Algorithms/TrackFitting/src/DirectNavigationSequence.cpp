@@ -22,7 +22,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <deque>
 #include <limits>
+#include <unordered_map>
 #include <numbers>
 #include <utility>
 #include <vector>
@@ -34,6 +36,11 @@ namespace {
 /// axis, i.e. the surface is a concentric cylinder and has to be ordered by the
 /// radius at which the trajectory crosses it rather than by its centre.
 constexpr double kOnAxisTolerance = 1e-3;
+
+/// Slack on the "material only past the first hit" cut, so a material surface
+/// that sits at the same path as the first measured surface (e.g. a layer
+/// cylinder through the innermost wires) is not lost to rounding.
+constexpr double kPreHitMaterialTolerance = 1.;
 
 /// Diagnostics and A/B switches, all opt-in via the environment so the default
 /// build behaves exactly as configured in code:
@@ -322,6 +329,7 @@ double prepareDirectNavigationSequence(
   const bool unwrap = curved && dnsUnwrapTurns() && std::isfinite(turnLength);
   const std::size_t hitCount = surfaceSequence.size();
   double maxHitPath = 0.;
+  double minHitPath = std::numeric_limits<double>::infinity();
   double turnOffset = 0.;
   double prevWrapped = 0.;
   bool havePrev = false;
@@ -346,6 +354,7 @@ double prepareDirectNavigationSequence(
     }
     if (std::isfinite(path) && path > 0.) {
       maxHitPath = std::max(maxHitPath, path);
+      minHitPath = std::min(minHitPath, path);
     }
     ordered.emplace_back(path, srf);
   }
@@ -355,6 +364,25 @@ double prepareDirectNavigationSequence(
       (unwrap && turnLength > 0.)
           ? static_cast<std::size_t>(std::floor(maxHitPath / turnLength))
           : 0;
+  // Material is only placed from the first measured surface onwards. The seed
+  // sits on the perigee at the origin, but what it describes is the track the
+  // finder saw in the CDC: nothing says the particle ever flew the stretch
+  // between the perigee and its first hit. For a primary that stretch is real,
+  // but the seed momentum is measured from the CDC hits, i.e. already after
+  // that material, so taking energy off it again on the way out biases the
+  // prior. For a displaced track it is not real at all -- a particle born at
+  // r = 400 mm was being scattered and slowed in the beam pipe, PXD, SVD and
+  // CDC inner wall along a helix extension it never travelled, up to a metre
+  // of arc for a soft track. On BBbar the ACTS-vs-GenFit efficiency gap grew
+  // with the length of that extension, to 10-12 points beyond 300 mm. The
+  // material inside the first hit is still accounted for on the extrapolation
+  // to the perigee, which runs with a MaterialInteractor.
+  //
+  // With no hit path known (every hit unreachable or non-positive) nothing is
+  // cut, as before.
+  const double materialStartPath =
+      std::isfinite(minHitPath) ? minHitPath - kPreHitMaterialTolerance : 0.;
+
   // Selection and ordering are two different questions and must not share a
   // test. `pathTo` deliberately ignores bounds so it can return a path for
   // every surface, which is what ordering needs; deciding *whether* a material
@@ -417,7 +445,8 @@ double prepareDirectNavigationSequence(
       const double path =
           (turn == 0) ? wrapped
                       : wrapped + static_cast<double>(turn) * turnLength;
-      if (!(path > 0.) || path >= maxHitPath + 1.0) {
+      if (!(path > 0.) || path < materialStartPath ||
+          path >= maxHitPath + 1.0) {
         continue;
       }
       if (!crossesOnTrajectory(srf, path)) {
@@ -460,6 +489,118 @@ double prepareDirectNavigationSequence(
     }
   }
   return maxPath;
+}
+
+std::vector<const Acts::Surface*> resortDirectNavigationSequence(
+    const Acts::GeometryContext& geoContext,
+    const std::vector<const Acts::Surface*>& previousSequence,
+    const std::vector<ReachedTrajectoryPoint>& reached) {
+  if (reached.empty()) {
+    return previousSequence;
+  }
+
+  // Helix path from a reached point to one surface, folded into one turn;
+  // 0 when there is none. prepareDirectNavigationSequence on a one-surface
+  // sequence is exactly that, with exactly its geometry (stereo crossing
+  // fixed point, concentric cylinders by radius), just evaluated from the
+  // fitted state instead of the seed.
+  auto helixPathFrom = [&](const ReachedTrajectoryPoint& from,
+                           const Acts::Surface* srf) {
+    std::vector<const Acts::Surface*> one{srf};
+    return prepareDirectNavigationSequence(geoContext, from.position,
+                                           from.direction, one, {},
+                                           from.signedHelixRadius);
+  };
+  auto turnLengthAt = [](const ReachedTrajectoryPoint& from) {
+    const double sinTheta = from.direction.head<2>().norm();
+    if (!(std::abs(from.signedHelixRadius) > 0.) || !(sinTheta > 1e-6)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return 2. * std::numbers::pi * std::abs(from.signedHelixRadius) / sinTheta;
+  };
+
+  // Reached indices per surface, in trajectory order: a material surface can
+  // sit in the sequence once per turn, and its n-th occurrence there is its
+  // n-th crossing.
+  std::unordered_map<const Acts::Surface*, std::deque<std::size_t>> crossings;
+  for (std::size_t j = 0; j < reached.size(); ++j) {
+    crossings[reached[j].surface].push_back(j);
+  }
+
+  constexpr double kKeepOrder = 1e-6;   // [mm], keeps ties in the old order
+  std::vector<std::pair<double, std::size_t>> keyed;
+  keyed.reserve(previousSequence.size());
+  std::vector<std::size_t> beforeFirst;
+  std::ptrdiff_t anchor = -1;
+  // Turn unwrapping along a run of unreached surfaces behind one anchor, as in
+  // prepareDirectNavigationSequence.
+  double runOffset = 0.;
+  double runPrevFolded = 0.;
+  bool runStarted = false;
+  std::size_t tieBreak = 0;
+
+  for (std::size_t i = 0; i < previousSequence.size(); ++i) {
+    const Acts::Surface* srf = previousSequence[i];
+    auto it = crossings.find(srf);
+    if (it != crossings.end() && !it->second.empty()) {
+      anchor = static_cast<std::ptrdiff_t>(it->second.front());
+      it->second.pop_front();
+      keyed.emplace_back(reached[anchor].pathLength, i);
+      runStarted = false;
+      continue;
+    }
+    if (anchor < 0) {
+      // Unreached and before anything reached: nothing fitted to place it by.
+      beforeFirst.push_back(i);
+      continue;
+    }
+    const ReachedTrajectoryPoint& from = reached[anchor];
+    const double folded = helixPathFrom(from, srf);
+    const double turn = turnLengthAt(from);
+    double key = 0.;
+    if (!(folded > 0.) || !std::isfinite(folded)) {
+      // The fitted helix does not reach it: keep it right behind its anchor,
+      // in the old order, rather than guess.
+      key = from.pathLength + kKeepOrder * static_cast<double>(++tieBreak);
+    } else {
+      if (!runStarted) {
+        // The first unreached surface behind an anchor was usually skipped
+        // because it lay slightly BEHIND the navigator; folded, that reads as
+        // almost a full turn ahead. Take it as behind the anchor instead, so
+        // it swaps in front of it, which is the order the track flew.
+        runOffset = (std::isfinite(turn) && folded > 0.5 * turn) ? -turn : 0.;
+        runStarted = true;
+      } else if (std::isfinite(turn) && folded < runPrevFolded - 0.5 * turn) {
+        runOffset += turn;
+      }
+      runPrevFolded = folded;
+      key = from.pathLength + folded + runOffset;
+    }
+    keyed.emplace_back(key, i);
+  }
+
+  // Unreached surfaces before the first reached one keep their order, just in
+  // front of it (the next pass starts on a later surface anyway).
+  const double front = reached.front().pathLength;
+  for (std::size_t k = 0; k < beforeFirst.size(); ++k) {
+    keyed.emplace_back(
+        front - kKeepOrder * static_cast<double>(beforeFirst.size() - k),
+        beforeFirst[k]);
+  }
+
+  std::stable_sort(keyed.begin(), keyed.end(),
+                   [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<const Acts::Surface*> resorted;
+  resorted.reserve(keyed.size());
+  for (const auto& [key, i] : keyed) {
+    (void)key;
+    // Same de-duplication as prepareDirectNavigationSequence: two crossings
+    // of one surface with nothing in between are one.
+    if (resorted.empty() || resorted.back() != previousSequence[i]) {
+      resorted.push_back(previousSequence[i]);
+    }
+  }
+  return resorted;
 }
 
 }  // namespace ActsExamples

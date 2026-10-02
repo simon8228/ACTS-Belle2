@@ -328,6 +328,103 @@ float Acts::computeEnergyLossLandauSigmaQOverP(const MaterialSlab& slab,
   return qOverBeta * pInv * pInv * sigmaE;
 }
 
+float Acts::computeEnergyLossGeant3SigmaQOverP(const MaterialSlab& slab,
+                                               float m, float qOverP,
+                                               float absQ) {
+  if (slab.isVacuum()) {
+    return 0.0f;
+  }
+  const RelativisticQuantities rq{m, qOverP, absQ};
+  if (rq.betaGamma < 0.05f) {
+    return computeEnergyLossLandauSigmaQOverP(slab, m, qOverP, absQ);
+  }
+  using namespace Acts::UnitLiterals;
+  // GenFit/GEANT3 units: eV, cm, g/cm^3, GeV.
+  const Material& mat = slab.material();
+  const double Z = mat.Z();
+  const double A = mat.Ar();
+  const double rho = mat.massDensity() / (1_g / 1_cm3);
+  const double step = slab.thickness() / 1_cm;
+  const double q2 = static_cast<double>(absQ) * absQ;
+  const double mass = m / 1_GeV;
+  const double me = Me / 1_GeV;
+  const double beta2 = rq.beta2;
+  const double gamma = rq.gamma;
+  const double gamma2 = gamma * gamma;
+
+  double sigma2E = 0.;  // eV^2
+  const double zeta = 153.4e3 * q2 / beta2 * Z / A * rho * step;  // eV
+  const double Emax = 2.e9 * me * beta2 * gamma2 /
+                      (1. + 2. * gamma * me / mass + (me / mass) * (me / mass));
+  const double kappa = zeta / Emax;
+  if (kappa > 0.01) {
+    // Vavilov-Gaussian regime
+    sigma2E = zeta * Emax * (1. - beta2 / 2.);
+  } else {
+    // Urban/Landau approximation; GenFit's Bethe-Bloch dE/dx, in GeV/cm, with
+    // the material's own mean excitation energy as GenFit takes it (mEE_).
+    const double mEE = mat.meanExcitationEnergy() / 1_eV;
+    const double massRatio = me / mass;
+    const double argument =
+        gamma2 * beta2 * me * 1.e3 * 2. /
+        ((1.e-6 * mEE) *
+         std::sqrt(1. + 2. * gamma * massRatio + massRatio * massRatio));
+    double dEdx = 0.307075 * Z / A * rho / beta2 * q2;
+    dEdx *= std::log(argument) - beta2;
+    dEdx *= 1.e-3;
+    if (dEdx < 0.) {
+      dEdx = 0.;
+    }
+    const double I = 16. * std::pow(Z, 0.9);  // eV
+    const double f2 = (Z > 2.) ? 2. / Z : 0.;
+    const double f1 = 1. - f2;
+    const double e2 = 10. * Z * Z;                               // eV
+    const double e1 = std::pow(I / std::pow(e2, f2), 1. / f1);  // eV
+    const double mbbgg2 = 2.e9 * mass * beta2 * gamma2;          // eV
+    const double denom = std::log(mbbgg2 / I) - beta2;
+    const double Sigma1 =
+        dEdx * 1.e9 * f1 / e1 * (std::log(mbbgg2 / e1) - beta2) / denom * 0.6;
+    const double Sigma2 =
+        (f2 > 0.)
+            ? dEdx * 1.e9 * f2 / e2 * (std::log(mbbgg2 / e2) - beta2) / denom *
+                  0.6
+            : 0.;
+    const double Sigma3 = dEdx * 1.e9 * Emax /
+                          (I * (Emax + I) * std::log((Emax + I) / I)) * 0.4;
+    const double Nc = (Sigma1 + Sigma2 + Sigma3) * step;
+    if (Nc > 50.) {
+      // truncated Landau distribution (GEANT3 manual W5013)
+      double sigmaAlpha = 15.76;
+      const double rlamed = -0.422784 - beta2 - std::log(zeta / Emax);
+      const double rlamax =
+          0.60715 + 1.1934 * rlamed +
+          (0.67794 + 0.052382 * rlamed) * std::exp(0.94753 + 0.74442 * rlamed);
+      if (rlamax <= 1010.) {
+        sigmaAlpha = 1.975560 + 9.898841e-02 * rlamax -
+                     2.828670e-04 * rlamax * rlamax +
+                     5.345406e-07 * std::pow(rlamax, 3.) -
+                     4.942035e-10 * std::pow(rlamax, 4.) +
+                     1.729807e-13 * std::pow(rlamax, 5.);
+      } else {
+        sigmaAlpha = 1.871887e+01 + 1.296254e-02 * rlamax;
+      }
+      sigmaAlpha = std::min(sigmaAlpha, 54.6);  // 0.9996 maximum cut
+      sigma2E = sigmaAlpha * sigmaAlpha * zeta * zeta;
+    } else {
+      // Urban model
+      constexpr double alpha = 0.996;
+      const double Ealpha = I / (1. - (alpha * Emax / (Emax + I)));
+      const double meanE32 = I * (Emax + I) / Emax * (Ealpha - I);
+      sigma2E = step * (Sigma1 * e1 * e1 + Sigma2 * e2 * e2 + Sigma3 * meanE32);
+    }
+  }
+  // var(q/p) = q^2/beta^2 / p^4 * var(E), as in both fitters
+  const double sigmaE = std::sqrt(sigma2E) * 1.e-9 * 1_GeV;
+  const float pInv = qOverP / absQ;
+  const float qOverBeta = std::sqrt(rq.q2OverBeta2);
+  return static_cast<float>(qOverBeta * pInv * pInv * sigmaE);
+}
+
 namespace {
 
 /// Compute mean energy loss from bremsstrahlung per radiation length.

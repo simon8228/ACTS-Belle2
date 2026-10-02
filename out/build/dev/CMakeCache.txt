@@ -35,11 +35,11 @@ ACTS_BUILD_BENCHMARKS:BOOL=OFF
 //Build documentation
 ACTS_BUILD_DOCS:BOOL=OFF
 
-//Build basic examples components
-ACTS_BUILD_EXAMPLES:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_EXAMPLES:UNINITIALIZED=ON
 
-//Build DD4hep-based code in the examples
-ACTS_BUILD_EXAMPLES_DD4HEP:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_EXAMPLES_DD4HEP:UNINITIALIZED=ON
 
 //Build EDM4hep-based code in the examples
 ACTS_BUILD_EXAMPLES_EDM4HEP:BOOL=OFF
@@ -65,23 +65,23 @@ ACTS_BUILD_EXAMPLES_PYTHIA8:BOOL=OFF
 //[Deprecated] Build python bindings and enables the examples
 ACTS_BUILD_EXAMPLES_PYTHON_BINDINGS:BOOL=OFF
 
-//Build modules based on ROOT I/O
-ACTS_BUILD_EXAMPLES_ROOT:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_EXAMPLES_ROOT:UNINITIALIZED=ON
 
-//Build unit tests
-ACTS_BUILD_EXAMPLES_UNITTESTS:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_EXAMPLES_UNITTESTS:UNINITIALIZED=ON
 
-//Build FAst TRAcking Simulation package
-ACTS_BUILD_FATRAS:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_FATRAS:UNINITIALIZED=ON
 
 //Build Geant4 Fatras package
 ACTS_BUILD_FATRAS_GEANT4:BOOL=OFF
 
-//Build integration tests
-ACTS_BUILD_INTEGRATIONTESTS:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_INTEGRATIONTESTS:UNINITIALIZED=ON
 
-//Build the OpenDataDetector
-ACTS_BUILD_ODD:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_ODD:UNINITIALIZED=ON
 
 //Build SVG display plugin
 ACTS_BUILD_PLUGIN_ACTSVG:BOOL=OFF
@@ -119,14 +119,14 @@ ACTS_BUILD_PLUGIN_ROOT:BOOL=OFF
 //Build Traccc plugin
 ACTS_BUILD_PLUGIN_TRACCC:BOOL=OFF
 
-//Build python bindings for all enabled components
-ACTS_BUILD_PYTHON_BINDINGS:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_PYTHON_BINDINGS:UNINITIALIZED=ON
 
 //Settings to build for python deployment with scikit-build-core
 ACTS_BUILD_PYTHON_WHEEL:BOOL=OFF
 
-//Build unit tests
-ACTS_BUILD_UNITTESTS:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_BUILD_UNITTESTS:UNINITIALIZED=ON
 
 //Generate targets to compile header files
 ACTS_COMPILE_HEADERS:BOOL=ON
@@ -143,14 +143,14 @@ ACTS_EIGEN3_SOURCE:STRING=URL;https://gitlab.com/libeigen/eigen/-/archive/3.4.0/
 //Enable CPU profiling using gperftools
 ACTS_ENABLE_CPU_PROFILING:BOOL=OFF
 
-//Enable failing on log messages with level above certain threshold
-ACTS_ENABLE_LOG_FAILURE_THRESHOLD:BOOL=OFF
+//No help, variable specified on the command line.
+ACTS_ENABLE_LOG_FAILURE_THRESHOLD:UNINITIALIZED=OFF
 
 //Enable memory profiling using gperftools
 ACTS_ENABLE_MEMORY_PROFILING:BOOL=OFF
 
-//Force assertions regardless of build type
-ACTS_FORCE_ASSERTIONS:BOOL=ON
+//No help, variable specified on the command line.
+ACTS_FORCE_ASSERTIONS:UNINITIALIZED=ON
 
 //Source to take FRNN from
 ACTS_FRNN_SOURCE:STRING=GIT_REPOSITORY;https://github.com/hrzhao76/FRNN/;GIT_TAG;5f8a48b0022300cd2863119f5646a5f31373e0c8
@@ -302,9 +302,8 @@ CMAKE_ADDR2LINE:FILEPATH=/usr/bin/addr2line
 //Path to a program.
 CMAKE_AR:FILEPATH=/usr/bin/ar
 
-//Choose the type of build, options are: None Debug Release RelWithDebInfo
-// MinSizeRel ...
-CMAKE_BUILD_TYPE:STRING=RelWithDebInfo
+//No help, variable specified on the command line.
+CMAKE_BUILD_TYPE:UNINITIALIZED=RelWithDebInfo
 
 CMAKE_CXX_CLANG_TIDY:STRING=
 

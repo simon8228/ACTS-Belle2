@@ -84,6 +84,22 @@ float computeEnergyLossLandauFwhm(const MaterialSlab& slab, float m,
 float computeEnergyLossLandauSigmaQOverP(const MaterialSlab& slab, float m,
                                          float qOverP, float absQ);
 
+/// Compute q/p sigma due to ionisation loss fluctuations with the GEANT3
+/// model (erland.F), as ported in GenFit's MaterialEffects::noiseBetheBloch.
+///
+/// @copydoc computeEnergyLossBethe
+///
+/// Unlike computeEnergyLossLandauSigmaQOverP, which takes the Gaussian with
+/// the Landau-Vavilov FWHM (the core width only), this is the variance of
+/// the energy-loss distribution including its tail of large energy
+/// transfers: the Vavilov-Gaussian variance for kappa > 0.01, otherwise the
+/// RMS of a Landau truncated at 0.9996 (more than 50 collisions) or the
+/// Urban model. For the same slab it is several times larger. Falls back to
+/// computeEnergyLossLandauSigmaQOverP below beta*gamma = 0.05, where GenFit's
+/// Bethe-Bloch is not valid.
+float computeEnergyLossGeant3SigmaQOverP(const MaterialSlab& slab, float m,
+                                         float qOverP, float absQ);
+
 /// Compute the mean energy loss due to radiative effects at high energies.
 ///
 /// @param slab      The traversed material and its properties

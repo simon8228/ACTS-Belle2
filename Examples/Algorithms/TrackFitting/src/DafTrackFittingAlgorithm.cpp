@@ -132,13 +132,23 @@ ProcessCode DafTrackFittingAlgorithm::execute(
   // per candidate per fitted track). Safe per-event even with a parallel
   // sequencer, since every event writes its own file.
   std::ofstream candidatesCsv;
+  std::ofstream statusCsv;
   std::ofstream traceCsv;
   std::ofstream linCsv;
   if (!m_cfg.outputCandidatesDir.empty()) {
     candidatesCsv.open(perEventFilepath(
         m_cfg.outputCandidatesDir, "daf-candidates.csv", ctx.eventNumber));
     candidatesCsv
-        << "proto_track_id,track_id,geometry_id,measurement_id,weight,chi2,won\n";
+        << "proto_track_id,track_id,geometry_id,measurement_id,weight,chi2,won,"
+           "reached\n";
+    // One row per proto track: how its fit ended (Acts::DafFitStatus), and
+    // failed=1 with track_id -1 where no track came out at all. basf2 keeps
+    // only fits GenFit calls converged, so this is what an analysis needs to
+    // drop the salvaged ones the same way.
+    statusCsv.open(perEventFilepath(m_cfg.outputCandidatesDir,
+                                    "daf-status.csv", ctx.eventNumber));
+    statusCsv << "proto_track_id,track_id,n_passes,converged,salvaged,"
+                 "salvaged_from_pass,failed\n";
     // Both traces read the same per-pass history and are selected by the same
     // event list; only which file gets written differs.
     const bool traceThisEvent =
@@ -300,10 +310,22 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                  << " surface group(s)");
     Acts::DafCandidateMap finalCandidateState;
     Acts::DafCandidateTrace candidateTrace;
+    Acts::DafFitStatus fitStatus;
     auto result = (*m_cfg.fit)(
         measurementGroups, orderedSurfaces, initialParams, options, calibrator,
         tracks, candidatesCsv.is_open() ? &finalCandidateState : nullptr,
-        (traceCsv.is_open() || linCsv.is_open()) ? &candidateTrace : nullptr);
+        (traceCsv.is_open() || linCsv.is_open()) ? &candidateTrace : nullptr,
+        &fitStatus);
+    if (statusCsv.is_open()) {
+      statusCsv << itrack << ','
+                << (result.ok() ? static_cast<long long>(result.value().index())
+                                : -1LL)
+                << ',' << fitStatus.nPasses << ','
+                << (fitStatus.converged ? 1 : 0) << ','
+                << (fitStatus.salvaged ? 1 : 0) << ','
+                << fitStatus.salvagedFromPass << ','
+                << (result.ok() ? 0 : 1) << '\n';
+    }
 
     if (result.ok()) {
       auto& track = result.value();
@@ -327,7 +349,10 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                           << surface->geometryId().value() << ','
                           << sourceLink.index() << ',' << candState.weights[i]
                           << ',' << candState.chi2[i] << ','
-                          << (i == bestIdx ? 1 : 0) << '\n';
+                          // An unreached surface has every weight at 0, so
+                          // the argmax would crown its first candidate.
+                          << (i == bestIdx && !candState.unreached ? 1 : 0)
+                          << ',' << (candState.unreached ? 0 : 1) << '\n';
           }
         }
       }

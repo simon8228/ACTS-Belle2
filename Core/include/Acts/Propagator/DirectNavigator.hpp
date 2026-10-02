@@ -23,8 +23,11 @@
 #include "Acts/Utilities/Logger.hpp"
 #include "Acts/Utilities/Result.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -73,6 +76,10 @@ namespace detail {
 /// The other ~70% are NOT a local ordering problem and this knob cannot reach
 /// them; they are still unexplained.
 ///
+/// Default 1 since 2026-10-02 (with the helix ranking and the 5 mm sensitive
+/// near limit below: the navigation study's best combination, FIT_CHANGES
+/// N4/N9/N10). ACTS_DN_LOOKAHEAD=0 restores the plain sequence.
+///
 /// @note A research knob, matching how the Belle II fork A/Bs the rest of the
 ///       direct-navigation chain. It belongs in DirectNavigator::Options before
 ///       this goes anywhere near upstream.
@@ -81,8 +88,39 @@ inline std::size_t directNavigatorLookahead() {
   static const std::size_t value = [] {
     const char* env = std::getenv("ACTS_DN_LOOKAHEAD");
     return env == nullptr
-               ? std::size_t{0}
+               ? std::size_t{1}
                : static_cast<std::size_t>(std::strtoul(env, nullptr, 10));
+  }();
+  return value;
+}
+
+/// ACTS_DN_NEAR_LIMIT_MM=X: accept a SENSITIVE surface whose intersection lies
+/// up to X mm behind the current position, instead of Options::nearLimit
+/// (-0.1 mm). The stepper takes a target behind it (its own near limit is
+/// -inf), so the track steps back to the straw it just passed instead of
+/// dropping it for good. Material surfaces keep the default. Default 5 mm
+/// since 2026-10-02 (FIT_CHANGES N9); X <= 0 turns it off. Returns the near
+/// limit to use (negative), or 0 when off.
+inline double directNavigatorSensitiveNearLimit() {
+  static const double value = [] {
+    const char* env = std::getenv("ACTS_DN_NEAR_LIMIT_MM");
+    const double mm = env == nullptr ? 5. : std::strtod(env, nullptr);
+    return mm > 0. ? -mm * UnitConstants::mm : 0.;
+  }();
+  return value;
+}
+
+/// ACTS_DN_HELIX_RANK=1: rank the look-ahead candidates (ACTS_DN_LOOKAHEAD)
+/// by a curvature-corrected path length instead of the straight-line one,
+/// using the q/p * B the fitter's actor stores in State::qopField. The
+/// straight-line distance to a straw mis-ranks neighbours on curling tracks
+/// and at shallow crossing angles. No effect without a look-ahead window or
+/// without an actor that fills qopField (only the DAF's does). Default on
+/// since 2026-10-02 (FIT_CHANGES N10); ACTS_DN_HELIX_RANK=0 turns it off.
+inline bool directNavigatorHelixRank() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DN_HELIX_RANK");
+    return env == nullptr || std::strcmp(env, "0") != 0;
   }();
   return value;
 }
@@ -154,6 +192,13 @@ class DirectNavigator {
 
     /// Navigation state - external interface: a break has been detected
     bool navigationBreak = false;
+
+    /// q/p times the field at the current position, d(direction)/ds =
+    /// direction x qopField. Filled by a fitter actor while
+    /// ACTS_DN_HELIX_RANK is on (see detail::directNavigatorHelixRank);
+    /// hasQopField says whether it is current.
+    Vector3 qopField = Vector3::Zero();
+    bool hasQopField = false;
 
     /// Navigation statistics
     NavigatorStatistics statistics;
@@ -374,6 +419,7 @@ class DirectNavigator {
 
       NavigationTarget best = NavigationTarget::None();
       std::int32_t bestIndex = state.surfaceIndex;
+      double bestRank = std::numeric_limits<double>::max();
 
       for (std::size_t ahead = 0; ahead <= lookahead; ++ahead) {
         const std::int32_t index =
@@ -382,18 +428,34 @@ class DirectNavigator {
           break;
         }
         const Surface& candidateSurface = *state.options.externalSurfaces[index];
+        // A straw just passed is still a valid target when
+        // ACTS_DN_NEAR_LIMIT_MM is set; material surfaces keep the default.
+        double nearLimit = state.options.nearLimit;
+        const double sensitiveNear = detail::directNavigatorSensitiveNearLimit();
+        if (sensitiveNear < 0. && candidateSurface.geometryId().sensitive() != 0) {
+          nearLimit = std::min(nearLimit, sensitiveNear);
+        }
         const NavigationTarget candidate = chooseIntersection(
             state.options.geoContext, candidateSurface, position, direction,
-            BoundaryTolerance::Infinite(), state.options.nearLimit, farLimit,
+            BoundaryTolerance::Infinite(), nearLimit, farLimit,
             state.options.surfaceTolerance);
         if (!candidate.isValid()) {
           continue;
         }
         // Reached first wins. With lookahead == 0 this runs once and the
         // behaviour is identical to taking state.navSurface() directly.
-        if (!best.isValid() || candidate.pathLength() < best.pathLength()) {
+        const double rank =
+            (lookahead > 0 && detail::directNavigatorHelixRank() &&
+             state.hasQopField && state.direction == Direction::Forward())
+                ? helixPathLength(state.options.geoContext, candidateSurface,
+                                  position, direction, state.qopField,
+                                  candidate.pathLength(),
+                                  state.options.surfaceTolerance)
+                : candidate.pathLength();
+        if (!best.isValid() || rank < bestRank) {
           best = candidate;
           bestIndex = index;
+          bestRank = rank;
         }
       }
 
@@ -475,6 +537,47 @@ class DirectNavigator {
   }
 
  private:
+  /// Path length to `surface` along the local helix, from the straight-line
+  /// estimate `straightPath`: two fixed-point steps that re-intersect from the
+  /// second-order position and direction at the current estimate
+  /// (x(s) = x + s d + s^2/2 d x k, d(s) = d + s d x k, k = q/p * B). Used
+  /// only to rank look-ahead candidates; the target itself is unchanged.
+  static double helixPathLength(const GeometryContext& gctx,
+                                const Surface& surface,
+                                const Vector3& position,
+                                const Vector3& direction,
+                                const Vector3& qopField, double straightPath,
+                                double tolerance) {
+    double s = straightPath;
+    const Vector3 bend = direction.cross(qopField);
+    for (int iteration = 0; iteration < 2; ++iteration) {
+      const Vector3 x = position + s * direction + 0.5 * s * s * bend;
+      const Vector3 d = (direction + s * bend).normalized();
+      auto intersections = surface.intersect(
+          gctx, x, d, BoundaryTolerance::Infinite(), tolerance);
+      // The correction is the solution nearest the predicted point. Taking
+      // the first valid one is wrong for cylinders: their solutions are
+      // sorted by signed path length, so the first is the far side behind,
+      // which ranked every material cylinder ahead of the straw next to it
+      // and dropped that straw (2026-10-01, FIT_CHANGES N10).
+      bool found = false;
+      double correction = 0.;
+      for (const auto& intersection : intersections) {
+        if (intersection.isValid() &&
+            (!found ||
+             std::abs(intersection.pathLength()) < std::abs(correction))) {
+          correction = intersection.pathLength();
+          found = true;
+        }
+      }
+      if (!found) {
+        return straightPath;
+      }
+      s += correction;
+    }
+    return s;
+  }
+
   NavigationTarget chooseIntersection(
       const GeometryContext& gctx, const Surface& surface,
       const Vector3& position, const Vector3& direction,

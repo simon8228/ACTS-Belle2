@@ -924,6 +924,25 @@ class DeterministicAnnealingFitter {
     // correct it. Only the per-candidate weights in candidateState are
     // otherwise carried between passes (see updateCandidateWeights).
     BoundTrackParameters currentSeed = sParameters;
+    // GenFit's iteration-1 blow-up of the seed covariance
+    // (DafFitterOptions::blowUpInitialSeed), the same treatment as the
+    // re-seed between passes.
+    if (dafOptions.blowUpInitialSeed && !dafOptions.referenceLinearization &&
+        sParameters.covariance().has_value()) {
+      BoundSquareMatrix seedCov = sParameters.covariance().value();
+      blowUpCovariance(seedCov, dafOptions.reseedCovarianceScaling,
+                       dafOptions.reseedResetOffDiagonals,
+                       dafOptions.reseedVarianceCeiling,
+                       dafOptions.reseedVarianceCeilings);
+      currentSeed = BoundTrackParameters(
+          sParameters.referenceSurface().getSharedPtr(),
+          sParameters.parameters(), seedCov, sParameters.particleHypothesis());
+      ACTS_DEBUG("Pass-0 seed covariance blown up by "
+                 << dafOptions.reseedCovarianceScaling << ": sigma(theta) "
+                 << std::sqrt(sParameters.covariance().value()(eBoundTheta,
+                                                                 eBoundTheta))
+                 << " -> " << std::sqrt(seedCov(eBoundTheta, eBoundTheta)));
+    }
 
     // Snapshot of the (seed, per-surface weights) that last produced a
     // successful forward+smooth pass. Used to salvage a usable result when a
@@ -936,6 +955,10 @@ class DeterministicAnnealingFitter {
     // them into the output container reproduces that success.
     std::optional<BoundTrackParameters> lastGoodSeed;
     DafCandidateMap lastGoodCandidateState;
+    // Which pass lastGoodSeed/lastGoodCandidateState belong to, and how many
+    // passes have been attempted -- for DafFitterOptions::fitStatus.
+    int lastGoodPass = -1;
+    std::size_t passesAttempted = 0;
 
     // Every pass's smoothed chi2, in pass order -- the raw material for the
     // end-of-fit convergence summary.
@@ -1003,8 +1026,11 @@ class DeterministicAnnealingFitter {
     // would cost the whole track.
     auto rebuildSequenceFor = [&](const BoundTrackParameters& seed,
                                   bool allowRebuild) {
+      // resortSequence, when set, re-orders from the previous pass's actual
+      // trajectory (see resortFromPass) and must not be overwritten here by a
+      // seed-helix rebuild.
       if (!allowRebuild || sSequence == nullptr ||
-          !dafOptions.rebuildSequence) {
+          !dafOptions.rebuildSequence || dafOptions.resortSequence) {
         return;
       }
       std::vector<const Surface*> rebuilt = dafOptions.rebuildSequence(seed);
@@ -1027,6 +1053,49 @@ class DeterministicAnnealingFitter {
       passSequence = std::move(rebuilt);
       ACTS_VERBOSE("Rebuilt the navigation sequence from this pass's seed: "
                    << passSequence.size() << " surfaces");
+    };
+
+    // Re-order passSequence from where the pass that produced @p passTrack
+    // actually reached each surface (DafFitterOptions::resortSequence). Same
+    // guard as rebuildSequenceFor: a result that lost a measurement surface is
+    // refused and the previous sequence kept.
+    auto resortFromPass = [&](const auto& passTrack) {
+      if (sSequence == nullptr || !dafOptions.resortSequence) {
+        return;
+      }
+      std::vector<typename DafFitterOptions<traj_t>::ReachedSurface> reached;
+      for (const auto ts : passTrack.trackStatesReversed()) {
+        if (!ts.hasSmoothed()) {
+          continue;
+        }
+        reached.push_back(
+            {&ts.referenceSurface(), ts.pathLength(),
+             BoundTrackParameters(ts.referenceSurface().getSharedPtr(),
+                                  ts.smoothed(), ts.smoothedCovariance(),
+                                  sParameters.particleHypothesis())});
+      }
+      if (reached.empty()) {
+        return;
+      }
+      std::ranges::reverse(reached);   // trajectory order, innermost first
+      std::vector<const Surface*> resorted =
+          dafOptions.resortSequence(passSequence, reached);
+      const std::unordered_set<const Surface*> present(resorted.begin(),
+                                                       resorted.end());
+      for (const auto& [surface, group] : measurementGroups) {
+        (void)group;
+        if (!present.contains(surface)) {
+          ACTS_DEBUG("Re-sorted sequence dropped measurement surface "
+                     << surface->geometryId()
+                     << "; keeping the previous pass's sequence");
+          return;
+        }
+      }
+      passSequence = std::move(resorted);
+      ACTS_VERBOSE("Re-sorted the navigation sequence from the pass's "
+                   "trajectory: "
+                   << passSequence.size() << " surfaces, " << reached.size()
+                   << " of them reached");
     };
 
     // Buffers for the reference-linearisation path, reused across passes.
@@ -1565,6 +1634,39 @@ class DeterministicAnnealingFitter {
         }
       }
 
+      // Surfaces this pass never reached: the propagation ended before them
+      // or the direct navigator stepped past them, so they have no calibrated
+      // state on the returned track. They keep whatever the passes before left
+      // (the 1/N seed if never reached at all), which exports as a balanced
+      // left/right decision, and neither nHoles nor nOutliers counted them.
+      // Their measurement exists but did not enter the fit -- an outlier in
+      // ACTS terms -- so give them weight 0, flag them and count them. Only
+      // here, on the result: during the annealing a surface missed by one pass
+      // can still be reached by the next, and zeroing it there would shut it
+      // out for good.
+      {
+        std::unordered_set<const Surface*> reachedSurfaces;
+        for (const auto ts : track.trackStatesReversed()) {
+          if (ts.hasCalibrated()) {
+            reachedSurfaces.insert(&ts.referenceSurface());
+          }
+        }
+        std::size_t nUnreached = 0;
+        for (auto& [surface, candState] : candidateState) {
+          candState.unreached = !reachedSurfaces.contains(surface);
+          if (candState.unreached) {
+            std::ranges::fill(candState.weights, 0.);
+            ++nUnreached;
+          }
+        }
+        track.nOutliers() += static_cast<unsigned int>(nUnreached);
+        if (nUnreached > 0) {
+          ACTS_DEBUG(nUnreached << " of " << candidateState.size()
+                                << " measurement surface(s) never reached; "
+                                   "counted as outliers with weight 0");
+        }
+      }
+
       // Export the weights this (result-producing) pass consumed -- also
       // correct for the salvage path, which restores candidateState to the
       // last good pass's weights before replaying through here.
@@ -1598,6 +1700,10 @@ class DeterministicAnnealingFitter {
         return salvaged.error();
       }
       logFitSummary("salvaged", salvaged.value().chi2());
+      if (dafOptions.fitStatus != nullptr) {
+        *dafOptions.fitStatus = DafFitStatus{passesAttempted, false, true,
+                                             lastGoodPass};
+      }
       return salvaged;
     };
 
@@ -1614,6 +1720,7 @@ class DeterministicAnnealingFitter {
     for (std::size_t iter = 0; iter < totalIterations; ++iter) {
       const bool isFinalIteration =
           oneLastIteration || (iter + 1 == totalIterations);
+      passesAttempted = iter + 1;
 
       const auto& seedPars = currentSeed.parameters();
       ACTS_DEBUG("DAF pass "
@@ -1634,6 +1741,13 @@ class DeterministicAnnealingFitter {
         auto finalTrack = finalizeInto(currentSeed, iter == 0);
         if (finalTrack.ok()) {
           logFitSummary("finished", finalTrack.value().chi2());
+          if (dafOptions.fitStatus != nullptr) {
+            // oneLastIteration is set only by a convergence test; reaching
+            // the pass limit without one is GenFit's "max iterations
+            // reached", which it reports as not converged.
+            *dafOptions.fitStatus =
+                DafFitStatus{passesAttempted, oneLastIteration, false, -1};
+          }
           return finalTrack.value();
         }
         ACTS_DEBUG("Final DAF pass failed: " << finalTrack.error());
@@ -1701,6 +1815,11 @@ class DeterministicAnnealingFitter {
       // for the next pass, so they reflect exactly what this pass consumed.
       lastGoodSeed = currentSeed;
       lastGoodCandidateState = candidateState;
+      lastGoodPass = static_cast<int>(iter);
+
+      // The next pass navigates the order this one actually flew, with the
+      // surfaces it missed placed by its fitted track (resortSequence).
+      resortFromPass(forwardTrack);
 
       // Carry the smoothed trajectory's first-measurement state forward as
       // next pass's seed. If none can be found (shouldn't happen: filter_impl

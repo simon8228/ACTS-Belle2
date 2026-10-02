@@ -30,7 +30,11 @@
 #include "ActsExamples/TrackFitting/DirectNavigationSequence.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <mutex>
 #include <string>
 #include <memory>
 #include <utility>
@@ -209,6 +213,19 @@ bool rebuildSequencePerPass() {
   return value;
 }
 
+/// Re-order the DirectNavigator sequence between passes from the trajectory
+/// the previous pass actually propagated (ACTS_DAF_RESORT=1): reached surfaces
+/// at their reached path length, missed ones placed by the fitted track, none
+/// dropped. See Acts::DafFitterOptions::resortSequence and
+/// resortDirectNavigationSequence. Takes precedence over ACTS_DAF_REBUILD_SEQ.
+bool resortSequencePerPass() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DAF_RESORT");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return value;
+}
+
 unsigned maxStepsOverride() {
   static const unsigned value = [] {
     const char* env = std::getenv("ACTS_MAX_STEPS");
@@ -216,6 +233,130 @@ unsigned maxStepsOverride() {
                           : static_cast<unsigned>(std::strtoul(env, nullptr, 10));
   }();
   return value;
+}
+
+/// Energy loss on the extrapolation from the first hit to the perigee,
+/// switched separately from the fit's: ACTS_O2_ENERGY_LOSS=0 turns it off, =1
+/// on, and unset follows the fit's own energyLoss flag as before. The fit and
+/// this extrapolation otherwise share one switch, so an energyLoss=False run
+/// cannot tell which of the two leaves the ~0.7 MeV momentum offset
+/// (FIT_CHANGES Q12).
+bool extrapolationEnergyLoss(bool fitEnergyLoss) {
+  static const int value = [] {
+    const char* env = std::getenv("ACTS_O2_ENERGY_LOSS");
+    return env == nullptr ? -1 : (std::atoi(env) != 0 ? 1 : 0);
+  }();
+  return value < 0 ? fitEnergyLoss : value == 1;
+}
+
+/// Directory to dump the material the perigee extrapolation applies, per track
+/// and per surface, or nullptr (the default) for no dump. ACTS_O2_MATERIAL_DUMP
+/// names it; two files are written there, o2-tracks.csv and o2-material.csv.
+/// For locating the ~0.7 MeV the extrapolation fails to add back (FIT_CHANGES
+/// Q12): the per-surface list shows which surface is missing or under-applied.
+const char* o2MaterialDumpDir() {
+  static const char* value = [] {
+    const char* env = std::getenv("ACTS_O2_MATERIAL_DUMP");
+    return (env != nullptr && *env != '\0') ? env : nullptr;
+  }();
+  return value;
+}
+
+/// Append one extrapolated track to the dump. `seq` counts dumped tracks over
+/// the whole run; a row is matched to its fitted track through the perigee
+/// parameters (end_*), which are exactly what track_parameters.csv holds.
+///
+/// o2-material.csv has one row per material interaction, in the order the
+/// extrapolation met them. thickness_x0 is the slab as applied: already scaled
+/// by path_correction and by the start/target update-mode factor, so the plain
+/// surface material is thickness_x0 / path_correction. dp_mev is the momentum
+/// before minus after; an inward extrapolation that restores energy gives
+/// negative values.
+void writeO2Material(const Acts::BoundTrackParameters& start,
+                     const Acts::BoundVector& end,
+                     const Acts::RecordedMaterial& material, double distance,
+                     const Acts::GeometryContext& gctx) {
+  using namespace Acts::UnitLiterals;
+  static std::mutex mutex;
+  static std::ofstream tracksCsv;
+  static std::ofstream materialCsv;
+  static std::size_t seq = 0;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!tracksCsv.is_open()) {
+    const std::string dir = o2MaterialDumpDir();
+    tracksCsv.open(dir + "/o2-tracks.csv");
+    materialCsv.open(dir + "/o2-material.csv");
+    tracksCsv << "seq,start_x,start_y,start_z,start_r,start_p,distance,"
+                 "end_d0,end_z0,end_phi,end_theta,end_qop,n_interactions,"
+                 "x0_total,dp_total_mev\n";
+    materialCsv << "seq,geometry_id,volume,boundary,layer,approach,sensitive,"
+                   "x,y,z,r,path_correction,thickness_x0,dp_mev\n";
+    tracksCsv << std::setprecision(12);
+    materialCsv << std::setprecision(8);
+  }
+
+  double dpTotal = 0.;
+  for (const auto& mi : material.materialInteractions) {
+    dpTotal += mi.deltaP;
+    const Acts::GeometryIdentifier id = (mi.surface != nullptr)
+                                            ? mi.surface->geometryId()
+                                            : mi.intersectionID;
+    materialCsv << seq << ',' << id.value() << ',' << id.volume() << ','
+                << id.boundary() << ',' << id.layer() << ',' << id.approach()
+                << ',' << id.sensitive() << ',' << mi.position.x() << ','
+                << mi.position.y() << ',' << mi.position.z() << ','
+                << std::hypot(mi.position.x(), mi.position.y()) << ','
+                << mi.pathCorrection << ','
+                << mi.materialSlab.thicknessInX0() << ','
+                << mi.deltaP / 1_MeV << '\n';
+  }
+  const Acts::Vector3 pos = start.position(gctx);
+  tracksCsv << seq << ',' << pos.x() << ',' << pos.y() << ',' << pos.z() << ','
+            << std::hypot(pos.x(), pos.y()) << ','
+            << start.absoluteMomentum() << ',' << distance << ','
+            << end[Acts::eBoundLoc0] << ',' << end[Acts::eBoundLoc1] << ','
+            << end[Acts::eBoundPhi] << ',' << end[Acts::eBoundTheta] << ','
+            << end[Acts::eBoundQOverP] << ','
+            << material.materialInteractions.size() << ','
+            << material.materialInX0 << ',' << dpTotal / 1_MeV << '\n';
+  ++seq;
+}
+
+/// Acts::extrapolateTrackToReferenceSurface, step for step, but keeping the
+/// propagation result so the recorded material can be dumped: the library
+/// helper discards it.
+template <typename track_proxy_t, typename propagator_t, typename options_t>
+Acts::Result<void> extrapolateAndDumpMaterial(
+    track_proxy_t track, const Acts::Surface& referenceSurface,
+    const propagator_t& propagator, options_t options,
+    Acts::TrackExtrapolationStrategy strategy,
+    const Acts::GeometryContext& gctx) {
+  auto findResult = Acts::findTrackStateForExtrapolation(
+      gctx, track, referenceSurface, strategy);
+  if (!findResult.ok()) {
+    return findResult.error();
+  }
+  auto& [trackState, distance] = *findResult;
+  options.direction = Acts::Direction::fromScalarZeroAsPositive(distance);
+  const Acts::BoundTrackParameters start =
+      track.createParametersFromState(trackState);
+
+  auto propagated =
+      propagator.template propagate<options_t, Acts::ForcedSurfaceReached>(
+          start, referenceSurface, options);
+  if (!propagated.ok()) {
+    return propagated.error();
+  }
+  track.setReferenceSurface(referenceSurface.getSharedPtr());
+  track.parameters() = propagated->endParameters.value().parameters();
+  track.covariance() =
+      propagated->endParameters.value().covariance().value();
+
+  writeO2Material(
+      start, track.parameters(),
+      propagated->template get<Acts::MaterialInteractor::result_type>(),
+      distance, gctx);
+  return Acts::Result<void>::success();
 }
 }  // namespace
 
@@ -276,6 +417,8 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
   bool reseedResetOffDiagonals = false;
   double reseedVarianceCeiling = 0.;
   double reseedAngleVarianceCeiling = 0.;
+  /// Same blow-up applied to the pass-0 seed (GenFit's iteration 1).
+  bool blowUpInitialSeed = false;
 
   /// GenFit's smoothing: backward filter combined with the forward one.
   bool useTwoFilterSmoothing = false;
@@ -436,6 +579,7 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
     dafOptions.twoFilterBlowUpFactor = twoFilterBlowUpFactor;
     dafOptions.reseedResetOffDiagonals = reseedResetOffDiagonals;
     dafOptions.reseedVarianceCeiling = reseedVarianceCeiling;
+    dafOptions.blowUpInitialSeed = blowUpInitialSeed;
     if (reseedAngleVarianceCeiling > 0.) {
       dafOptions.reseedVarianceCeilings[Acts::eBoundPhi] =
           reseedAngleVarianceCeiling;
@@ -457,10 +601,12 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
       const GeneralFitterOptions& options,
       const MeasurementCalibratorAdapter& calibrator, TrackContainer& tracks,
       Acts::DafCandidateMap* finalCandidateState,
-      Acts::DafCandidateTrace* candidateTrace) const override {
+      Acts::DafCandidateTrace* candidateTrace,
+      Acts::DafFitStatus* fitStatus) const override {
     auto dafOptions = makeDafOptions(options, calibrator);
     dafOptions.finalCandidateState = finalCandidateState;
     dafOptions.candidateTrace = candidateTrace;
+    dafOptions.fitStatus = fitStatus;
     if (useDirectNavigator) {
       // The DirectNavigator cannot target the reference (perigee) surface,
       // which lies outside its sequence: fit without one, then extrapolate
@@ -489,17 +635,31 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
           //
           // Scattering and energy loss follow the fit's own switches, so a
           // no-material fit does not silently acquire material here.
+          // ACTS_O2_ENERGY_LOSS overrides the energy loss alone (see
+          // extrapolationEnergyLoss).
           Propagator::Options<Acts::ActorList<Acts::MaterialInteractor>>
               extrapolationOptions(options.geoContext, options.magFieldContext);
           auto& matInteractor = extrapolationOptions.actorList
                                     .template get<Acts::MaterialInteractor>();
           matInteractor.multipleScattering = multipleScattering;
-          matInteractor.energyLoss = energyLoss;
-          auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
-              result.value(), *options.referenceSurface, referencePropagator,
-              extrapolationOptions, dafOptions.referenceSurfaceStrategy);
-          if (!extrapolationResult.ok()) {
-            return extrapolationResult.error();
+          matInteractor.energyLoss = extrapolationEnergyLoss(energyLoss);
+          if (o2MaterialDumpDir() != nullptr) {
+            // Same extrapolation, with the material recorded and written out.
+            matInteractor.recordInteractions = true;
+            auto dumped = extrapolateAndDumpMaterial(
+                result.value(), *options.referenceSurface, referencePropagator,
+                extrapolationOptions, dafOptions.referenceSurfaceStrategy,
+                options.geoContext);
+            if (!dumped.ok()) {
+              return dumped.error();
+            }
+          } else {
+            auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
+                result.value(), *options.referenceSurface, referencePropagator,
+                extrapolationOptions, dafOptions.referenceSurfaceStrategy);
+            if (!extrapolationResult.ok()) {
+              return extrapolationResult.error();
+            }
           }
         }
         return result;
@@ -564,6 +724,26 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
                 return rebuilt;
               };
         }
+        if (resortSequencePerPass()) {
+          dafOptions.resortSequence =
+              [this, &options](
+                  const std::vector<const Acts::Surface*>& previousSequence,
+                  const std::vector<
+                      Acts::DafFitterOptions<
+                          Acts::VectorMultiTrajectory>::ReachedSurface>&
+                      reached) {
+                std::vector<ReachedTrajectoryPoint> points;
+                points.reserve(reached.size());
+                for (const auto& r : reached) {
+                  points.push_back({r.surface, r.pathLength,
+                                    r.parameters.position(options.geoContext),
+                                    r.parameters.direction(),
+                                    seedSignedRadius(r.parameters, options)});
+                }
+                return resortDirectNavigationSequence(options.geoContext,
+                                                      previousSequence, points);
+              };
+        }
 
         if (dropped.empty()) {
           return runDirectFit(measurementGroups, sequence);
@@ -625,7 +805,7 @@ ActsExamples::makeDafFitterFunction(
     double reseedVarianceCeiling, double reseedAngleVarianceCeiling,
     bool useTwoFilterSmoothing, double twoFilterBlowUpFactor,
     bool referencePiecewise, bool referenceAnchorSmoothed,
-    bool referencePiecewiseSelfCheck,
+    bool referencePiecewiseSelfCheck, bool blowUpInitialSeed,
     const Acts::Logger& logger) {
   // Stepper should be copied into the fitters. Keep a handle on the field
   // first: the direct-navigation branch needs it to size the seed curvature.
@@ -688,6 +868,7 @@ ActsExamples::makeDafFitterFunction(
   fitterFunction->referencePiecewise = referencePiecewise;
   fitterFunction->referenceAnchorSmoothed = referenceAnchorSmoothed;
   fitterFunction->referencePiecewiseSelfCheck = referencePiecewiseSelfCheck;
+  fitterFunction->blowUpInitialSeed = blowUpInitialSeed;
   fitterFunction->useMomentMatchedCombiner = useMomentMatchedCombiner;
   fitterFunction->reseedCovarianceScaling = reseedCovarianceScaling;
   fitterFunction->chiSquareDenominator = chiSquareDenominator;
