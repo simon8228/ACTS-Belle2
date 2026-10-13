@@ -17,6 +17,8 @@
 #include "Acts/Propagator/NavigatorOptions.hpp"
 #include "Acts/Propagator/NavigatorStatistics.hpp"
 #include "Acts/Surfaces/BoundaryTolerance.hpp"
+#include "Acts/Surfaces/CylinderBounds.hpp"
+#include "Acts/Surfaces/LineBounds.hpp"
 #include "Acts/Surfaces/Surface.hpp"
 #include "Acts/Utilities/Enumerate.hpp"
 #include "Acts/Utilities/Intersection.hpp"
@@ -24,12 +26,15 @@
 #include "Acts/Utilities/Result.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace Acts {
@@ -84,7 +89,15 @@ namespace detail {
 ///       direct-navigation chain. It belongs in DirectNavigator::Options before
 ///       this goes anywhere near upstream.
 /// @return The configured look-ahead window
+/// Per-thread override of directNavigatorLookahead(), set around a single fit
+/// by the DAF look-ahead fallback (DafTrackFittingAlgorithm,
+/// ACTS_DAF_LOOKAHEAD_FALLBACK). Unset, the environment value applies.
+inline thread_local std::optional<std::size_t> directNavigatorLookaheadOverride;
+
 inline std::size_t directNavigatorLookahead() {
+  if (directNavigatorLookaheadOverride.has_value()) {
+    return *directNavigatorLookaheadOverride;
+  }
   static const std::size_t value = [] {
     const char* env = std::getenv("ACTS_DN_LOOKAHEAD");
     return env == nullptr
@@ -123,6 +136,75 @@ inline bool directNavigatorHelixRank() {
     return env == nullptr || std::strcmp(env, "0") != 0;
   }();
   return value;
+}
+
+/// ACTS_DN_HELIX_HOLD=N (0 or unset = off): when neither the next surface
+/// nor the look-ahead window has an intersection ahead on the current
+/// STRAIGHT line, but the local helix (position, direction, qopField) passes
+/// the straw within its cell further on, keep that surface as the next one to
+/// try and step on without a target -- at most N times in a row per surface --
+/// instead of skipping it for good.
+///
+/// Why: a low-pT track curling inside the CDC turns round. Near the turning
+/// point the next straws, on the returning arm, lie behind the current
+/// straight direction although the helix reaches them a few cm later. They
+/// were skipped one after the other until the sequence ran out, the navigation
+/// broke, and the pass coasted to its path limit: phase3s2 B events, forward
+/// 20-60 deg below 0.3 GeV, 6.6% of hits never reached and 92% of those in a
+/// contiguous TAIL at a median 0.72 helix turns. GenFit extrapolates the helix
+/// to every wire and has no such test.
+///
+/// Needs qopField (filled by the fitter actors with the default helix rank).
+inline unsigned int directNavigatorHelixHold() {
+  static const unsigned int value = [] {
+    const char* env = std::getenv("ACTS_DN_HELIX_HOLD");
+    return env == nullptr ? 0u
+                          : static_cast<unsigned int>(std::strtoul(env, nullptr, 10));
+  }();
+  return value;
+}
+
+/// ACTS_DN_DROP_UNREACHABLE=N (0 or unset = off): every N steps spent on one
+/// target, check that the local helix (position, direction, qopField) can
+/// still reach it -- a straw within its cell inside one turn, a concentric
+/// material cylinder inside the helix's radius range -- and drop it if not.
+/// Material cylinders the helix cannot reach are also skipped when the next
+/// target is chosen.
+///
+/// Why: the navigator never gives up on a target by itself. A target the
+/// track can no longer reach (a material cylinder beyond the radius a curling
+/// track turns at, a straw the fitted track misses) stays "reachable" on the
+/// straight line, so the pass flies on to its path limit and every straw
+/// after it in the sequence is lost. On 200 CATFinder events (proto track 10
+/// of each event, look-ahead 1) that was 2595 of 3282 lost straws, against 687
+/// dropped as behind (2026-10-08).
+inline unsigned int directNavigatorDropUnreachable() {
+  static const unsigned int value = [] {
+    const char* env = std::getenv("ACTS_DN_DROP_UNREACHABLE");
+    return env == nullptr ? 0u
+                          : static_cast<unsigned int>(std::strtoul(env, nullptr, 10));
+  }();
+  return value;
+}
+
+/// Counters for ACTS_DN_DROP_UNREACHABLE, printed once at exit.
+struct DirectNavigatorDropCounters {
+  std::atomic<long> straws{0};
+  std::atomic<long> material{0};
+  std::atomic<long> materialSkipped{0};
+  ~DirectNavigatorDropCounters() {
+    if (straws + material + materialSkipped > 0) {
+      std::fprintf(stderr,
+                   "DirectNavigator (ACTS_DN_DROP_UNREACHABLE): dropped %ld "
+                   "straw and %ld material targets the local helix could not "
+                   "reach; skipped %ld unreachable material surfaces\n",
+                   straws.load(), material.load(), materialSkipped.load());
+    }
+  }
+};
+inline DirectNavigatorDropCounters& directNavigatorDropCounters() {
+  static DirectNavigatorDropCounters counters;
+  return counters;
 }
 
 }  // namespace detail
@@ -199,6 +281,16 @@ class DirectNavigator {
     /// hasQopField says whether it is current.
     Vector3 qopField = Vector3::Zero();
     bool hasQopField = false;
+
+    /// ACTS_DN_HELIX_HOLD: the surface index currently held, and how many
+    /// consecutive steps it has been held for.
+    std::int32_t heldIndex = -2;
+    unsigned int holdCount = 0;
+
+    /// ACTS_DN_DROP_UNREACHABLE: the surface index of the current target and
+    /// the steps spent on it.
+    std::int32_t pursuedIndex = -2;
+    unsigned int pursuedSteps = 0;
 
     /// Navigation statistics
     NavigatorStatistics statistics;
@@ -428,6 +520,13 @@ class DirectNavigator {
           break;
         }
         const Surface& candidateSurface = *state.options.externalSurfaces[index];
+        if (detail::directNavigatorDropUnreachable() > 0 && state.hasQopField &&
+            candidateSurface.type() == Surface::Cylinder &&
+            !cylinderReachable(candidateSurface, position, direction,
+                               state.qopField)) {
+          ++detail::directNavigatorDropCounters().materialSkipped;
+          continue;
+        }
         // A straw just passed is still a valid target when
         // ACTS_DN_NEAR_LIMIT_MM is set; material surfaces keep the default.
         double nearLimit = state.options.nearLimit;
@@ -478,6 +577,38 @@ class DirectNavigator {
         return best;
       }
 
+      // ACTS_DN_HELIX_HOLD: not ahead on the straight line, but on the helix?
+      if (const unsigned int maxHolds = detail::directNavigatorHelixHold();
+          maxHolds > 0 && state.hasQopField &&
+          state.direction == Direction::Forward()) {
+        if (state.heldIndex != state.surfaceIndex) {
+          state.heldIndex = state.surfaceIndex;
+          state.holdCount = 0;
+        }
+        if (state.holdCount < maxHolds &&
+            helixReachesStraw(state.options.geoContext, state.navSurface(),
+                              position, direction, state.qopField)) {
+          if (state.holdCount == 0) {
+            static std::atomic<long> nHeld{0};
+            if ((nHeld.fetch_add(1) + 1) % 10000 == 0) {
+              std::fprintf(stderr,
+                           "DirectNavigator: %ld straws held for the helix "
+                           "(ACTS_DN_HELIX_HOLD)\n",
+                           nHeld.load());
+            }
+          }
+          ++state.holdCount;
+          ACTS_VERBOSE("Holding " << state.navSurface().geometryId()
+                                  << ": behind the straight line, ahead on "
+                                     "the helix (hold "
+                                  << state.holdCount << ")");
+          // Undo nextSurface(): the next call tries this surface again,
+          // from wherever the track has curved to by then.
+          state.surfaceIndex -= step;
+          return NavigationTarget::None();
+        }
+      }
+
       ACTS_VERBOSE("No valid intersection found with surface "
                    << state.navSurface().geometryId()
                    << ", trying next surface.");
@@ -499,13 +630,42 @@ class DirectNavigator {
   /// @param direction The current direction
   ///
   /// @return True if the target is valid
-  bool checkTargetValid(const State& state, const Vector3& position,
+  bool checkTargetValid(State& state, const Vector3& position,
                         const Vector3& direction) const {
-    static_cast<void>(state);
-    static_cast<void>(position);
-    static_cast<void>(direction);
-
-    return true;
+    const unsigned int every = detail::directNavigatorDropUnreachable();
+    if (every == 0 || !state.hasQopField ||
+        state.direction != Direction::Forward() || state.surfaceIndex < 0 ||
+        state.endOfSurfaces()) {
+      return true;
+    }
+    if (state.pursuedIndex != state.surfaceIndex) {
+      state.pursuedIndex = state.surfaceIndex;
+      state.pursuedSteps = 0;
+    }
+    if (++state.pursuedSteps % every != 0) {
+      return true;
+    }
+    const Surface& target = state.navSurface();
+    // By type: the CDC material cylinders carry a sensitive id too.
+    const bool sensitive = target.type() == Surface::Straw;
+    const bool reachable =
+        sensitive ? helixPassesStraw(state.options.geoContext, target, position,
+                                     direction, state.qopField)
+                  : cylinderReachable(target, position, direction,
+                                      state.qopField);
+    if (reachable) {
+      return true;
+    }
+    if (sensitive) {
+      ++detail::directNavigatorDropCounters().straws;
+    } else {
+      ++detail::directNavigatorDropCounters().material;
+    }
+    ACTS_VERBOSE("Dropping target " << target.geometryId()
+                                    << ": the local helix no longer reaches it "
+                                       "(ACTS_DN_DROP_UNREACHABLE)");
+    // The next nextTarget() call advances past it.
+    return false;
   }
 
   /// @brief Handle the surface reached
@@ -537,6 +697,126 @@ class DirectNavigator {
   }
 
  private:
+  /// ACTS_DN_HELIX_HOLD: does the local helix from (position, direction),
+  /// d(direction)/ds = direction x qopField, pass this straw within its cell
+  /// ahead of here? Exact helix in the local field, sampled every 2 mm up to
+  /// half a turn or 1.5 m; "within its cell" is 3x the straw's bound radius,
+  /// generous on purpose, since this only decides hold-or-skip.
+  static bool helixReachesStraw(const GeometryContext& gctx,
+                                const Surface& surface,
+                                const Vector3& position,
+                                const Vector3& direction,
+                                const Vector3& qopField) {
+    if (surface.type() != Surface::Straw) {
+      return false;
+    }
+    const auto* bounds = dynamic_cast<const LineBounds*>(&surface.bounds());
+    const double omega = qopField.norm();
+    if (bounds == nullptr || !(omega > 0.)) {
+      return false;
+    }
+    const double reach = 3. * bounds->get(LineBounds::eR);
+    const Vector3 b = qopField / omega;
+    const Vector3 dPar = direction.dot(b) * b;
+    const Vector3 dPerp = direction - dPar;
+    const Vector3 dCross = dPerp.cross(b);
+    const Vector3 center = surface.localToGlobalTransform(gctx).translation();
+    const Vector3 axis = surface.localToGlobalTransform(gctx).rotation().col(2);
+    auto distance = [&](double s) {
+      const Vector3 x = position + dPar * s + dPerp * (std::sin(omega * s) / omega) +
+                        dCross * ((1. - std::cos(omega * s)) / omega);
+      Vector3 r = x - center;
+      r -= r.dot(axis) * axis;
+      return r.norm();
+    };
+    const double step = 2. * UnitConstants::mm;
+    const double sMax = std::min(M_PI / omega, 1.5 * UnitConstants::m);
+    double best = distance(0.);
+    double bestS = 0.;
+    for (double s = step; s <= sMax; s += step) {
+      const double dist = distance(s);
+      if (dist < best) {
+        best = dist;
+        bestS = s;
+      }
+    }
+    return bestS > step && best <= reach;
+  }
+
+  /// ACTS_DN_DROP_UNREACHABLE: does the local helix pass a straw within
+  /// 3x the bound radius + 30 mm at any point from here to one full turn (at
+  /// most 3 m) ahead? Unlike helixReachesStraw this counts the current point
+  /// too, so a straw the track is just reaching is not dropped. The 30 mm is
+  /// for the seed: CATFinder's misses its first straw by more than a cell
+  /// (with 3x alone the first straw of a track was dropped), and the fit only
+  /// pulls the track onto it once there. Only targets the track cannot get
+  /// near at all are to be dropped.
+  static bool helixPassesStraw(const GeometryContext& gctx,
+                               const Surface& surface, const Vector3& position,
+                               const Vector3& direction,
+                               const Vector3& qopField) {
+    if (surface.type() != Surface::Straw) {
+      return true;
+    }
+    const auto* bounds = dynamic_cast<const LineBounds*>(&surface.bounds());
+    const double omega = qopField.norm();
+    if (bounds == nullptr || !(omega > 0.)) {
+      return true;
+    }
+    const double reach =
+        3. * bounds->get(LineBounds::eR) + 30. * UnitConstants::mm;
+    const Vector3 b = qopField / omega;
+    const Vector3 dPar = direction.dot(b) * b;
+    const Vector3 dPerp = direction - dPar;
+    const Vector3 dCross = dPerp.cross(b);
+    const Vector3 center = surface.localToGlobalTransform(gctx).translation();
+    const Vector3 axis = surface.localToGlobalTransform(gctx).rotation().col(2);
+    const double step = 3. * UnitConstants::mm;
+    const double sMax = std::min(2. * M_PI / omega, 3. * UnitConstants::m);
+    for (double s = 0.; s <= sMax; s += step) {
+      const Vector3 x = position + dPar * s + dPerp * (std::sin(omega * s) / omega) +
+                        dCross * ((1. - std::cos(omega * s)) / omega);
+      Vector3 r = x - center;
+      r -= r.dot(axis) * axis;
+      if (r.norm() <= reach) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// ACTS_DN_DROP_UNREACHABLE: can the local helix reach the radius of a
+  /// concentric cylinder? Its transverse distance from the z axis stays in
+  /// [|c| - rho, |c| + rho] for a circle of radius rho about c (field taken
+  /// along z). 10 mm of slack for the field map and energy loss. Anything that
+  /// is not a concentric cylinder counts as reachable.
+  static bool cylinderReachable(const Surface& surface, const Vector3& position,
+                                const Vector3& direction,
+                                const Vector3& qopField) {
+    if (surface.type() != Surface::Cylinder) {
+      return true;
+    }
+    const auto* bounds = dynamic_cast<const CylinderBounds*>(&surface.bounds());
+    const double omega = qopField.norm();
+    if (bounds == nullptr || !(omega > 0.)) {
+      return true;
+    }
+    const double radius = bounds->get(CylinderBounds::eR);
+    const Vector3 b = qopField / omega;
+    const Vector3 dPerp = direction - direction.dot(b) * b;
+    const double sinAlpha = dPerp.norm();
+    if (!(sinAlpha > 1e-6)) {
+      return true;
+    }
+    const double rho = sinAlpha / omega;
+    // d(direction)/ds = omega * direction x b points to the centre
+    const Vector3 toCentre = dPerp.cross(b) / sinAlpha;
+    const Vector3 c = position + rho * toCentre;
+    const double cr = std::hypot(c.x(), c.y());
+    const double slack = 10. * UnitConstants::mm;
+    return radius <= cr + rho + slack && radius >= std::abs(cr - rho) - slack;
+  }
+
   /// Path length to `surface` along the local helix, from the straight-line
   /// estimate `straightPath`: two fixed-point steps that re-intersect from the
   /// second-order position and direction at the current estimate

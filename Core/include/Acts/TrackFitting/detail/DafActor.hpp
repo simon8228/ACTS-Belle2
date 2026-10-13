@@ -28,6 +28,10 @@
 #include "Acts/Utilities/Logger.hpp"
 #include "Acts/Utilities/Result.hpp"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -347,6 +351,38 @@ class DafActor {
           << (isPathLimitReached ? "path limit reached; " : "")
           << (isTargetReached ? "target surface reached; " : ""));
 
+      // ACTS_DAF_END_STATS=1 (diagnostic): why do passes end with surfaces
+      // still unprocessed? Counted per reason x navigation-broken.
+      static const bool endStats = [] {
+        const char* e = std::getenv("ACTS_DAF_END_STATS");
+        return e != nullptr && std::atoi(e) != 0;
+      }();
+      static std::atomic<long> nAllPasses{0};
+      if (endStats && (nAllPasses.fetch_add(1) + 1) % 50000 == 0) {
+        std::fprintf(stderr, "DAF END STATS: %ld passes finished\n",
+                     nAllPasses.load());
+      }
+      if (endStats && !isTrackComplete && inputMeasurementGroups != nullptr) {
+        static std::atomic<long> counts[2][5] = {};
+        static std::atomic<long> nPasses{0};
+        const int broken = navigator.navigationBreak(state.navigation) ? 1 : 0;
+        const int reason = isEndOfWorldReached ? 0
+                           : isVolumeConstraintReached ? 1
+                           : isPathLimitReached ? 2
+                           : isTargetReached ? 3 : 4;
+        ++counts[broken][reason];
+        if ((nPasses.fetch_add(1) + 1) % 500 == 0) {
+          std::fprintf(stderr,
+                       "DAF END STATS (passes ending with surfaces left): "
+                       "[nav ok] world %ld volume %ld path %ld target %ld other %ld | "
+                       "[nav broken] world %ld volume %ld path %ld target %ld other %ld\n",
+                       counts[0][0].load(), counts[0][1].load(), counts[0][2].load(),
+                       counts[0][3].load(), counts[0][4].load(), counts[1][0].load(),
+                       counts[1][1].load(), counts[1][2].load(), counts[1][3].load(),
+                       counts[1][4].load());
+        }
+      }
+
       if (isTargetReached) {
         auto res = stepper.boundState(state.stepping, *targetReached.surface);
         if (!res.ok()) {
@@ -483,6 +519,23 @@ class DafActor {
              "DafActor requires prior weights to be initialized by the "
              "outer driver before propagation");
 
+      // What the filter is about to use on this surface, for the per-pass
+      // trace: with a drift-chamber calibrator this differs from the
+      // weight-update value (calibratedLoc0), which is taken at the smoothed
+      // state instead of this pass's predicted one.
+      candState.filterCalibratedLoc0.assign(
+          candidates.size(), std::numeric_limits<double>::quiet_NaN());
+      candState.filterCalibratedVariance.assign(
+          candidates.size(), std::numeric_limits<double>::quiet_NaN());
+      for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (candidates[i].calibratedSize() == 1) {
+          candState.filterCalibratedLoc0[i] =
+              candidates[i].effectiveCalibrated()[0];
+          candState.filterCalibratedVariance[i] =
+              candidates[i].effectiveCalibratedCovariance()(0, 0);
+        }
+      }
+
       // Drift-circle initial weights (see strawInitialWeightRadiusFactor).
       // Only on the first pass: from the second onward the weights carry real
       // information from the previous pass's smoothed trajectory, which must
@@ -516,6 +569,19 @@ class DafActor {
             candState.weights.assign(candidates.size(), weight);
           }
         }
+      }
+
+      // A calibrator flags a candidate as an outlier when it has no valid
+      // measurement -- a CDC hit with a negative drift time. GenFit's
+      // CDCRecoHit starts such a hit with weight 0 on BOTH candidates, but
+      // only on the first pass: from the second onward KalmanFitterRefTrack
+      // restores the DAF's own weights over it, so the hit competes like any
+      // other. Same here: zero on the first pass, the annealing's weights
+      // afterwards.
+      if (firstPass &&
+          std::any_of(candidates.begin(), candidates.end(),
+                      [](const auto& c) { return c.typeFlags().isOutlier(); })) {
+        candState.weights.assign(candidates.size(), 0.);
       }
 
       // Reference-recording mode stops here: no weighted combination, no
@@ -619,6 +685,26 @@ class DafActor {
         return updateRes.error();
       }
       typeFlags.setIsMeasurement();
+
+      // ACTS_DAF_ROBUST_THETA_MIN: reject an update that throws the state off
+      // the detector or to the pole (see detail::dafStateIsUnphysical); the
+      // track carries on from the prediction, as if the hit were an outlier
+      // on this pass.
+      if (const double thetaMin = detail::dafRobustThetaMin(); thetaMin > 0. &&
+          detail::dafStateIsUnphysical(trackStateProxy.filtered(), surface,
+                                       thetaMin)) {
+        static std::atomic<long> nRejected{0};
+        if ((nRejected.fetch_add(1) + 1) % 10000 == 0) {
+          std::fprintf(stderr, "DafActor: %ld unphysical updates rejected\n",
+                       nRejected.load());
+        }
+        ACTS_DEBUG("Rejecting unphysical update on surface "
+                   << surface.geometryId() << ": filtered "
+                   << trackStateProxy.filtered().transpose());
+        trackStateProxy.filtered() = trackStateProxy.predicted();
+        trackStateProxy.filteredCovariance() =
+            trackStateProxy.predictedCovariance();
+      }
 
       result.lastTrackIndex = trackStateProxy.index();
 

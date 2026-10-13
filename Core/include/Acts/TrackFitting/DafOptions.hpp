@@ -16,6 +16,8 @@
 #include "Acts/Geometry/GeometryContext.hpp"
 #include "Acts/MagneticField/MagneticFieldContext.hpp"
 #include "Acts/Propagator/PropagatorOptions.hpp"
+#include "Acts/Surfaces/LineBounds.hpp"
+#include "Acts/Surfaces/Surface.hpp"
 #include "Acts/TrackFinding/CombinatorialKalmanFilterExtensions.hpp"
 #include "Acts/TrackFitting/KalmanFitter.hpp"
 #include "Acts/TrackFitting/detail/VoidFitterComponents.hpp"
@@ -23,7 +25,9 @@
 #include "Acts/Utilities/CalibrationContext.hpp"
 #include "Acts/Utilities/Delegate.hpp"
 
+#include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <unordered_map>
@@ -120,6 +124,44 @@ struct DafFitterExtensions {
 /// their current annealed weight, and their most recent chi2 -- carried by
 /// the outer driver across forward+smooth passes since it cannot live in the
 /// trajectory (only the effective combined measurement is written there).
+namespace detail {
+/// Experiment (ACTS_DAF_ROBUST_THETA_MIN, rad; unset or 0 = off): a bound
+/// state is "unphysical" for the DAF if its theta is within thetaMin of the
+/// poles, its q/p is not finite, or -- on a straw -- its position along the
+/// wire is more than 10 mm past the wire's end. ACTS's bound (phi, theta)
+/// parametrisation cannot absorb a huge angular prior the way GenFit's
+/// unbounded plane state does: one update can throw the direction to the pole
+/// and the position off the detector, after which no propagation can start.
+/// With this set, such a filter update is rejected (the predicted state is
+/// kept) and such a smoothed state is not used as the next pass's seed.
+inline double dafRobustThetaMin() {
+  static const double value = [] {
+    const char* e = std::getenv("ACTS_DAF_ROBUST_THETA_MIN");
+    return e != nullptr ? std::atof(e) : 0.;
+  }();
+  return value;
+}
+
+inline bool dafStateIsUnphysical(const BoundVector& params,
+                                 const Surface& surface, double thetaMin) {
+  const double theta = params[eBoundTheta];
+  if (!std::isfinite(theta) || theta < thetaMin || theta > M_PI - thetaMin ||
+      !std::isfinite(params[eBoundQOverP]) || !std::isfinite(params[eBoundLoc0]) ||
+      !std::isfinite(params[eBoundLoc1])) {
+    return true;
+  }
+  if (surface.type() == Surface::Straw) {
+    const auto* lineBounds = dynamic_cast<const LineBounds*>(&surface.bounds());
+    if (lineBounds != nullptr &&
+        std::abs(params[eBoundLoc1]) >
+            lineBounds->get(LineBounds::eHalfLengthZ) + 10.) {
+      return true;
+    }
+  }
+  return false;
+}
+}  // namespace detail
+
 struct DafCandidateState {
   /// The candidate source links, fixed for the whole fit
   DafMeasurementGroup candidates;
@@ -127,6 +169,20 @@ struct DafCandidateState {
   std::vector<double> weights;
   /// Most recent chi2 of each candidate, same order as candidates
   std::vector<double> chi2;
+  /// The calibrated loc0 and its variance each candidate had when chi2 was
+  /// last computed, same order as candidates; NaN where the measurement is not
+  /// 1D. With a calibrator that re-evaluates its measurements at the track
+  /// state (a drift chamber's x-t relation) this is the value the fit actually
+  /// used, which the input files do not hold.
+  std::vector<double> calibratedLoc0;
+  std::vector<double> calibratedVariance;
+  /// The same, but from the calibration the Kalman FILTER used on this
+  /// surface in the most recent pass, i.e. evaluated at the filter's predicted
+  /// state rather than at the smoothed state the weights are scored against.
+  /// NaN where the measurement is not 1D or the pass never reached the
+  /// surface.
+  std::vector<double> filterCalibratedLoc0;
+  std::vector<double> filterCalibratedVariance;
   /// Set on the exported final state only: the result-producing pass never
   /// turned this surface into a calibrated track state (the propagation ended
   /// before it or the direct navigator stepped past it). Its weights are then

@@ -9,6 +9,7 @@
 #include "ActsExamples/TrackFitting/DafTrackFittingAlgorithm.hpp"
 
 #include "Acts/Definitions/Algebra.hpp"
+#include "Acts/Propagator/DirectNavigator.hpp"
 #include "Acts/EventData/BoundTrackParameters.hpp"
 #include "Acts/EventData/SourceLink.hpp"
 #include "Acts/EventData/TrackProxy.hpp"
@@ -30,11 +31,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <fstream>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <system_error>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -45,6 +49,26 @@ DafTrackFittingAlgorithm::DafTrackFittingAlgorithm(
     Config config, std::unique_ptr<const Acts::Logger> logger)
     : IAlgorithm("DafTrackFittingAlgorithm", std::move(logger)),
       m_cfg(std::move(config)) {
+  // ACTS_DAF_LOOKAHEAD_FALLBACK=N: refit unusable fits with look-ahead N (see
+  // execute). Unset or negative: off. ACTS_DAF_FALLBACK_MIN_REACHED: the
+  // reached-surface fraction below which a fit counts as unusable, default
+  // 0.5 (tracking_helpers.DAF_MIN_REACHED_FRACTION).
+  if (const char* env = std::getenv("ACTS_DAF_LOOKAHEAD_FALLBACK");
+      env != nullptr && *env != '\0') {
+    m_lookaheadFallback = std::strtol(env, nullptr, 10);
+  }
+  if (const char* env = std::getenv("ACTS_DAF_FALLBACK_MIN_REACHED");
+      env != nullptr && *env != '\0') {
+    m_lookaheadFallbackMinReached = std::strtod(env, nullptr);
+  }
+  if (m_lookaheadFallback >= 0) {
+    // `logger` is the constructor argument here, so name the member
+    ACTS_LOG_WITH_LOGGER(this->logger(), Acts::Logging::INFO,
+                         "DAF look-ahead fallback: unusable fits are refitted "
+                         "with look-ahead "
+                             << m_lookaheadFallback << " (min reached fraction "
+                             << m_lookaheadFallbackMinReached << ")");
+  }
   if (m_cfg.inputMeasurements.empty()) {
     throw std::invalid_argument("Missing input measurement collection");
   }
@@ -75,6 +99,16 @@ DafTrackFittingAlgorithm::DafTrackFittingAlgorithm(
   m_inputMeasurementParticlesMap.maybeInitialize(
       m_cfg.inputMeasurementParticlesMap);
   m_outputTracks.initialize(m_cfg.outputTracks);
+}
+
+ProcessCode DafTrackFittingAlgorithm::finalize() {
+  if (m_lookaheadFallback >= 0) {
+    ACTS_INFO("DAF look-ahead fallback: " << m_nLookaheadRetries
+                                          << " fits retried with look-ahead "
+                                          << m_lookaheadFallback << ", retry kept on "
+                                          << m_nLookaheadRetriesKept);
+  }
+  return ProcessCode::SUCCESS;
 }
 
 ProcessCode DafTrackFittingAlgorithm::execute(
@@ -140,7 +174,7 @@ ProcessCode DafTrackFittingAlgorithm::execute(
         m_cfg.outputCandidatesDir, "daf-candidates.csv", ctx.eventNumber));
     candidatesCsv
         << "proto_track_id,track_id,geometry_id,measurement_id,weight,chi2,won,"
-           "reached\n";
+           "reached,cal_local0,cal_var\n";
     // One row per proto track: how its fit ended (Acts::DafFitStatus), and
     // failed=1 with track_id -1 where no track came out at all. basf2 keeps
     // only fits GenFit calls converged, so this is what an analysis needs to
@@ -148,7 +182,7 @@ ProcessCode DafTrackFittingAlgorithm::execute(
     statusCsv.open(perEventFilepath(m_cfg.outputCandidatesDir,
                                     "daf-status.csv", ctx.eventNumber));
     statusCsv << "proto_track_id,track_id,n_passes,converged,salvaged,"
-                 "salvaged_from_pass,failed\n";
+                 "salvaged_from_pass,failed,lookahead_retry\n";
     // Both traces read the same per-pass history and are selected by the same
     // event list; only which file gets written differs.
     const bool traceThisEvent =
@@ -160,7 +194,8 @@ ProcessCode DafTrackFittingAlgorithm::execute(
       traceCsv.open(perEventFilepath(
           m_cfg.outputCandidatesDir, "daf-weight-trace.csv", ctx.eventNumber));
       traceCsv << "proto_track_id,track_id,iteration,temperature,is_final,"
-                  "geometry_id,measurement_id,weight,chi2,track_loc0\n";
+                  "geometry_id,measurement_id,weight,chi2,track_loc0,"
+                  "filter_local0,filter_var,cal_local0,cal_var\n";
     }
     if (m_cfg.outputLinearizationTrace && traceThisEvent) {
       linCsv.open(perEventFilepath(m_cfg.outputCandidatesDir,
@@ -255,7 +290,13 @@ ProcessCode DafTrackFittingAlgorithm::execute(
 
       Acts::DafMeasurementGroup group;
       std::size_t nRejected = 0;
-      if (m_cfg.protoTrackCandidatesOnly) {
+      // poolingVolumes: outside the listed volumes, the proto track's own
+      // pick only (see the config).
+      const bool poolHere =
+          m_cfg.poolingVolumes.empty() ||
+          std::find(m_cfg.poolingVolumes.begin(), m_cfg.poolingVolumes.end(),
+                    geoId.volume()) != m_cfg.poolingVolumes.end();
+      if (m_cfg.protoTrackCandidatesOnly || !poolHere) {
         // Trust the proto track's pick verbatim: exactly one candidate per
         // surface, first pick wins on duplicates (as the KF's try_emplace
         // keyed by surface does).
@@ -311,11 +352,93 @@ ProcessCode DafTrackFittingAlgorithm::execute(
     Acts::DafCandidateMap finalCandidateState;
     Acts::DafCandidateTrace candidateTrace;
     Acts::DafFitStatus fitStatus;
+    const bool wantTrace = traceCsv.is_open() || linCsv.is_open();
+    // The final candidate state is always taken: the look-ahead fallback
+    // needs its `unreached` flags even when no candidates file is written.
+    const std::size_t nTracksBefore = tracks.size();
     auto result = (*m_cfg.fit)(
         measurementGroups, orderedSurfaces, initialParams, options, calibrator,
-        tracks, candidatesCsv.is_open() ? &finalCandidateState : nullptr,
-        (traceCsv.is_open() || linCsv.is_open()) ? &candidateTrace : nullptr,
+        tracks, &finalCandidateState, wantTrace ? &candidateTrace : nullptr,
         &fitStatus);
+
+    // Look-ahead fallback (ACTS_DAF_LOOKAHEAD_FALLBACK=N): a fit that failed,
+    // was salvaged, or reached fewer than the minimum fraction of its
+    // surfaces -- the three outcomes the analysis drops (DAF_STATUS_CUT
+    // "degenerate") -- is fitted a second time with the DirectNavigator
+    // look-ahead set to N, and the better of the two is kept. A wider
+    // look-ahead recovers curlers that the default loses by jumping arms,
+    // but loses other tracks the default fits, so neither setting alone is
+    // best (2026-10-07, 200-event CATFinder sample).
+    //   lookaheadRetry: 0 = not retried, 1 = retried and the first fit kept,
+    //                   2 = retried and the retry kept
+    int lookaheadRetry = 0;
+    const auto reachedFraction = [&](const Acts::DafCandidateMap& state) {
+      std::size_t reached = 0;
+      for (const Acts::Surface* surface : orderedSurfaces) {
+        auto it = state.find(surface);
+        if (it != state.end() && !it->second.unreached) {
+          ++reached;
+        }
+      }
+      return orderedSurfaces.empty()
+                 ? 0.
+                 : static_cast<double>(reached) / orderedSurfaces.size();
+    };
+    // (usable, produced a track, reached fraction): compared lexicographically
+    const auto score = [&](bool ok, const Acts::DafFitStatus& st,
+                           const Acts::DafCandidateMap& state) {
+      const double frac = ok ? reachedFraction(state) : 0.;
+      const bool usable =
+          ok && !st.salvaged && frac >= m_lookaheadFallbackMinReached;
+      return std::tuple<bool, bool, double>{usable, ok, frac};
+    };
+    if (m_lookaheadFallback >= 0) {
+      const auto first = score(result.ok(), fitStatus, finalCandidateState);
+      if (!std::get<0>(first)) {
+        const std::size_t nTracksMid = tracks.size();
+        Acts::DafCandidateMap retryState;
+        Acts::DafCandidateTrace retryTrace;
+        Acts::DafFitStatus retryStatus;
+        Acts::detail::directNavigatorLookaheadOverride =
+            static_cast<std::size_t>(m_lookaheadFallback);
+        auto retry = (*m_cfg.fit)(
+            measurementGroups, orderedSurfaces, initialParams, options,
+            calibrator, tracks, &retryState,
+            wantTrace ? &retryTrace : nullptr, &retryStatus);
+        Acts::detail::directNavigatorLookaheadOverride.reset();
+        const auto second = score(retry.ok(), retryStatus, retryState);
+        // Ties keep the first fit, so the default's tracks never change.
+        const bool keepRetry = second > first;
+        lookaheadRetry = keepRetry ? 2 : 1;
+        // Drop the loser's tracks. Everything from this proto track sits at
+        // the end of the container, so erasing shifts only the winner.
+        const std::size_t loseBegin = keepRetry ? nTracksBefore : nTracksMid;
+        const std::size_t loseEnd = keepRetry ? nTracksMid : tracks.size();
+        for (std::size_t i = loseEnd; i > loseBegin; --i) {
+          tracks.removeTrack(i - 1);
+        }
+        if (keepRetry) {
+          finalCandidateState = std::move(retryState);
+          candidateTrace = std::move(retryTrace);
+          fitStatus = retryStatus;
+          if (retry.ok()) {
+            // The retry's track moved down by the first fit's track count.
+            const auto index = retry.value().index() - (nTracksMid - nTracksBefore);
+            result = tracks.getTrack(index);
+          } else {
+            result = std::move(retry);
+          }
+        } else if (result.ok()) {
+          // The first fit's track is still at its own index.
+          result = tracks.getTrack(result.value().index());
+        }
+        ++m_nLookaheadRetries;
+        if (keepRetry) {
+          ++m_nLookaheadRetriesKept;
+        }
+      }
+    }
+
     if (statusCsv.is_open()) {
       statusCsv << itrack << ','
                 << (result.ok() ? static_cast<long long>(result.value().index())
@@ -324,7 +447,7 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                 << (fitStatus.converged ? 1 : 0) << ','
                 << (fitStatus.salvaged ? 1 : 0) << ','
                 << fitStatus.salvagedFromPass << ','
-                << (result.ok() ? 0 : 1) << '\n';
+                << (result.ok() ? 0 : 1) << ',' << lookaheadRetry << '\n';
     }
 
     if (result.ok()) {
@@ -352,7 +475,16 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                           // An unreached surface has every weight at 0, so
                           // the argmax would crown its first candidate.
                           << (i == bestIdx && !candState.unreached ? 1 : 0)
-                          << ',' << (candState.unreached ? 0 : 1) << '\n';
+                          << ',' << (candState.unreached ? 0 : 1) << ','
+                          // the loc0 the fit used in its last weight update
+                          << (i < candState.calibratedLoc0.size()
+                                  ? candState.calibratedLoc0[i]
+                                  : std::numeric_limits<double>::quiet_NaN())
+                          << ','
+                          << (i < candState.calibratedVariance.size()
+                                  ? candState.calibratedVariance[i]
+                                  : std::numeric_limits<double>::quiet_NaN())
+                          << '\n';
           }
         }
       }
@@ -377,7 +509,22 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                        << surface->geometryId().value() << ','
                        << sourceLink.index() << ',' << candState.weights[i]
                        << ',' << candState.chi2[i] << ','
-                       << candState.trackLoc0 << '\n';
+                       << candState.trackLoc0;
+              // The calibrated loc0/variance this pass used: in the filter
+              // (at the predicted state) and in the weight update (at the
+              // smoothed state). NaN where the pass did not calibrate it.
+              const auto value = [i](const std::vector<double>& v) {
+                return i < v.size() ? v[i]
+                                    : std::numeric_limits<double>::quiet_NaN();
+              };
+              // Micron-level differences on ~10 mm values: more digits than the
+              // stream's default 6.
+              const auto oldPrecision = traceCsv.precision(10);
+              traceCsv << ',' << value(candState.filterCalibratedLoc0) << ','
+                       << value(candState.filterCalibratedVariance) << ','
+                       << value(candState.calibratedLoc0) << ','
+                       << value(candState.calibratedVariance) << '\n';
+              traceCsv.precision(oldPrecision);
             }
           }
         }

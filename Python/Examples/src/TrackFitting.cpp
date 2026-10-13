@@ -19,6 +19,7 @@
 #include "ActsPython/Utilities/Helpers.hpp"
 #include "ActsPython/Utilities/Macros.hpp"
 #include "ActsExamples/EventData/DriftChamberCalibrator.hpp"
+#include "ActsExamples/EventData/CdcXtCalibrator.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -53,7 +54,7 @@ void addTrackFitting(py::module& mex) {
       inputClusters, inputMeasurementParticlesMap, outputTracks,
       trackingGeometry, fit, pickTrack, calibrator, linkForward, maxSteps,
       outputCandidatesDir, outputWeightTrace, weightTraceEvents,
-      outputLinearizationTrace, protoTrackCandidatesOnly);
+      outputLinearizationTrace, protoTrackCandidatesOnly, poolingVolumes);
 
   {
     py::class_<TrackFitterFunction, std::shared_ptr<TrackFitterFunction>>(
@@ -177,6 +178,21 @@ void addTrackFitting(py::module& mex) {
         []() -> std::shared_ptr<MeasurementCalibrator> {
           return std::make_shared<ActsExamples::DriftChamberCalibrator>();
         });
+    // Belle II CDC: re-evaluates the x-t relation per candidate at the fit's
+    // track state; needs the clusters (cells.csv) and a build configured with
+    // ACTS_BELLE2_CDC_STANDALONE_DIR.
+    mex.def("makeCdcXtCalibrator",
+        [](bool recomputeSag, bool dropNonPositive, bool flagNonPositive,
+           bool useTrackTime) -> std::shared_ptr<MeasurementCalibrator> {
+          ActsExamples::CdcXtCalibrator::Config cfg;
+          cfg.recomputeSag = recomputeSag;
+          cfg.dropNonPositive = dropNonPositive;
+          cfg.flagNonPositive = flagNonPositive;
+          cfg.useTrackTime = useTrackTime;
+          return std::make_shared<ActsExamples::CdcXtCalibrator>(cfg);
+        },
+        "recomputeSag"_a = false, "dropNonPositive"_a = false,
+        "flagNonPositive"_a = false, "useTrackTime"_a = false);
     // Kept only so existing call sites (SVD_CDC_tracking/fitting_cdc.py) still
     // import. The calibrator no longer takes a sign policy, so this is now the
     // same calibrator as makeDriftChamberCalibrator above: both sign the drift

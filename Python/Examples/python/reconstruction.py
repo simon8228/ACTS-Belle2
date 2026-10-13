@@ -720,6 +720,7 @@ def addMyDafFitter(
     weightTraceEvents: Optional[List[int]] = None,
     outputLinearizationTrace: bool = False,
     protoTrackCandidatesOnly: bool = False,
+    poolingVolumes: Optional[List[int]] = None,
     strawInitialWeightRadiusFactor: float = 0.0,
     useMomentMatchedCombiner: bool = False,
     reseedCovarianceScaling: float = 1.0,
@@ -818,6 +819,10 @@ def addMyDafFitter(
     the DirectNavigator sequence exactly like the KF fitter function (straight-line
     -path sort from the seed, material-surface injection, 1.5 m path limit) instead
     of trusting proto-track order.
+
+    `poolingVolumes`: with pooling on, pool only on surfaces of these volumes
+    (e.g. [69], the CDC straws, for SVD+CDC tracks) and take the proto track's
+    own pick elsewhere; None/empty pools everywhere (the default).
     """
     customLogLevel = acts.examples.defaultLogging(s, logLevel)
 
@@ -840,6 +845,7 @@ def addMyDafFitter(
         weightTraceEvents=weightTraceEvents or [],
         outputLinearizationTrace=outputLinearizationTrace,
         protoTrackCandidatesOnly=protoTrackCandidatesOnly,
+        poolingVolumes=poolingVolumes or [],
         fit=acts.examples.makeDafFitterFunction(
             trackingGeometry,
             field,

@@ -20,6 +20,7 @@
 #include "ActsExamples/TrackFitting/DafFitterFunction.hpp"
 
 #include <cstddef>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -122,6 +123,13 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
     /// which is the point: it isolates fitter-core differences in
     /// KF-vs-DAF comparisons.
     bool protoTrackCandidatesOnly = false;
+    /// Volumes whose surfaces pool candidates (truth-gated, as above) when
+    /// protoTrackCandidatesOnly is off. Empty (the default): every surface
+    /// pools. Otherwise a surface in any other volume takes the proto
+    /// track's own pick only. For SVD+CDC tracks: pool on the CDC straws
+    /// (volume 69), where it brings in the left/right mirror, but not on the
+    /// SVD sensors, where it would only bring in other tracks' clusters.
+    std::vector<std::uint64_t> poolingVolumes;
   };
 
   /// Constructor of the DAF fitting algorithm
@@ -136,6 +144,9 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
   /// @param ctx is the algorithm context that holds event-wise information
   /// @return a process code to steer the algorithm flow
   ProcessCode execute(const AlgorithmContext& ctx) const final;
+
+  /// Prints the look-ahead fallback counters
+  ProcessCode finalize() final;
 
   /// Get readonly access to the config parameters
   const Config& config() const { return m_cfg; }
@@ -156,6 +167,15 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
       this, "InputMeasurementParticlesMap"};
 
   WriteDataHandle<ConstTrackContainer> m_outputTracks{this, "OutputTracks"};
+
+  /// Look-ahead of the second fit for unusable fits; -1 = no second fit.
+  /// From ACTS_DAF_LOOKAHEAD_FALLBACK.
+  long m_lookaheadFallback = -1;
+  /// Reached-surface fraction below which a fit is unusable.
+  /// From ACTS_DAF_FALLBACK_MIN_REACHED.
+  double m_lookaheadFallbackMinReached = 0.5;
+  mutable std::atomic<std::size_t> m_nLookaheadRetries{0};
+  mutable std::atomic<std::size_t> m_nLookaheadRetriesKept{0};
 };
 
 }  // namespace ActsExamples

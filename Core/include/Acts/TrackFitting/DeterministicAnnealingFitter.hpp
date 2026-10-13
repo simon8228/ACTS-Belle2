@@ -38,7 +38,10 @@
 #include "Acts/Utilities/TrackHelpers.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -557,6 +560,17 @@ class DeterministicAnnealingFitter {
 
       candState.weights = weights;
       candState.chi2 = chi2s;
+      candState.calibratedLoc0.assign(group.size(),
+                                      std::numeric_limits<double>::quiet_NaN());
+      candState.calibratedVariance.assign(
+          group.size(), std::numeric_limits<double>::quiet_NaN());
+      for (std::size_t i = 0; i < group.size(); ++i) {
+        if (candidates[i].calibratedSize() == 1) {
+          candState.calibratedLoc0[i] = candidates[i].effectiveCalibrated()[0];
+          candState.calibratedVariance[i] =
+              candidates[i].effectiveCalibratedCovariance()(0, 0);
+        }
+      }
       // Where this pass's own smoothed track crossed the surface, in the same
       // local coordinate the candidates use. Recorded alongside the weights
       // so a trace can show the track moving as the weights that pull it
@@ -861,6 +875,10 @@ class DeterministicAnnealingFitter {
       candState.weights.assign(group.size(),
                                1. / static_cast<double>(group.size()));
       candState.chi2.assign(group.size(), 0.);
+      candState.calibratedLoc0.assign(group.size(),
+                                      std::numeric_limits<double>::quiet_NaN());
+      candState.calibratedVariance.assign(
+          group.size(), std::numeric_limits<double>::quiet_NaN());
     }
 
     AnnealingUtility annealing(dafOptions.annealingConfig);
@@ -1006,6 +1024,17 @@ class DeterministicAnnealingFitter {
       entry.isFinal = isFinal;
       entry.state = candidateState;
       dafOptions.candidateTrace->push_back(std::move(entry));
+      // The filter's calibration is written by the actor only on surfaces a
+      // pass reaches; clear it so the next pass's entry cannot show a value
+      // left over from this one.
+      for (auto& [surface, candState] : candidateState) {
+        std::fill(candState.filterCalibratedLoc0.begin(),
+                  candState.filterCalibratedLoc0.end(),
+                  std::numeric_limits<double>::quiet_NaN());
+        std::fill(candState.filterCalibratedVariance.begin(),
+                  candState.filterCalibratedVariance.end(),
+                  std::numeric_limits<double>::quiet_NaN());
+      }
     };
 
     // The sequence each pass actually navigates. Starts as the caller's, and is
@@ -1826,7 +1855,22 @@ class DeterministicAnnealingFitter {
       // already requires at least one measurement state), keep the previous
       // seed rather than fail the whole fit over a re-seeding nicety.
       auto firstMeasurement = findFirstMeasurementState(forwardTrack);
-      if (firstMeasurement.ok()) {
+      // ACTS_DAF_ROBUST_THETA_MIN: a smoothed state off the detector or at the
+      // pole would make the next pass fail before it starts (NavigatorError:
+      // no start volume); keep the previous seed instead.
+      if (firstMeasurement.ok() && detail::dafRobustThetaMin() > 0. &&
+          detail::dafStateIsUnphysical((*firstMeasurement).smoothed(),
+                                       (*firstMeasurement).referenceSurface(),
+                                       detail::dafRobustThetaMin())) {
+        static std::atomic<long> nRejectedSeeds{0};
+        if ((nRejectedSeeds.fetch_add(1) + 1) % 1000 == 0) {
+          std::fprintf(stderr, "DAF: %ld unphysical re-seeds rejected\n",
+                       nRejectedSeeds.load());
+        }
+        ACTS_DEBUG("Smoothed first-measurement state is unphysical, keeping "
+                   "the previous seed: "
+                   << (*firstMeasurement).smoothed().transpose());
+      } else if (firstMeasurement.ok()) {
         const auto& fm = *firstMeasurement;
         // Keep the smoothed parameters -- that is the re-linearisation this
         // re-seeding exists for -- but inflate the covariance that comes with
