@@ -46,3 +46,6 @@ codegen/src/codegen.egg-info/
 # tracked a pointer to a repo it had no URL for and reported it modified on
 # every status. Ignore the whole directory, not just that one entry.
 _deps/
+
+# VS Code CMake Tools configure output (out/build/<preset>), not part of the build
+/out/
