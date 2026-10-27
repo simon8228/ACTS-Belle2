@@ -21,6 +21,7 @@
 #include "Acts/Propagator/ActorList.hpp"
 #include "Acts/Propagator/DirectNavigator.hpp"
 #include "Acts/Propagator/MaterialInteractor.hpp"
+#include "Acts/Propagator/PropagatorError.hpp"
 #include "Acts/Propagator/PropagatorOptions.hpp"
 #include "Acts/TrackFitting/DafFitterError.hpp"
 #include "Acts/TrackFitting/DafOptions.hpp"
@@ -48,6 +49,7 @@
 #include <system_error>
 #include <type_traits>
 #include <unordered_map>
+#include <chrono>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -231,6 +233,8 @@ class DeterministicAnnealingFitter {
              "DirectNavigator requires a surface sequence for "
              "DeterministicAnnealingFitter");
       propagatorOptions.navigation.externalSurfaces = *sSequence;
+      propagatorOptions.navigation.recordSkips =
+          detail::dafNavigationTraceSink != nullptr;
     }
 
     auto& dafActor = propagatorOptions.actorList.template get<DafActorT>();
@@ -257,7 +261,10 @@ class DeterministicAnnealingFitter {
             TrackContainerFrontend track_container_t>
   auto filter_impl(const BoundTrackParameters& sParameters,
                    const propagator_options_t& propagatorOptions,
-                   track_container_t& trackContainer) const
+                   track_container_t& trackContainer,
+                   std::optional<std::size_t> navigationPass = std::nullopt,
+                   bool navigationIsResult = false,
+                   const Surface** stuckMaterial = nullptr) const
       -> Result<typename track_container_t::TrackProxy> {
     auto propagatorState = m_propagator.makeState(propagatorOptions);
 
@@ -273,6 +280,69 @@ class DeterministicAnnealingFitter {
     dafResult.fittedStates = &trackContainer.trackStateContainer();
 
     auto result = m_propagator.propagate(propagatorState);
+
+    // detail::dafDropStuckMaterial: did the pass end with measurement surfaces
+    // left while chasing a material surface? Then that is the surface it could
+    // not reach.
+    if (stuckMaterial != nullptr) {
+      *stuckMaterial = nullptr;
+      const auto* groups =
+          propagatorState.options.actorList.template get<Actor>()
+              .inputMeasurementGroups;
+      if constexpr (requires {
+                      propagatorState.navigation.surfaceIndex;
+                      propagatorState.navigation.navigationBreak;
+                    }) {
+        const auto& navState = propagatorState.navigation;
+        const auto& sequence = navState.options.externalSurfaces;
+        if (result.ok() && groups != nullptr &&
+            dafResult.measurementStates < groups->size() &&
+            !navState.navigationBreak && navState.surfaceIndex >= 0 &&
+            navState.surfaceIndex < static_cast<std::int32_t>(sequence.size())) {
+          const Surface* target = sequence[navState.surfaceIndex];
+          if (target != nullptr && !groups->contains(target) &&
+              target->surfaceMaterial() != nullptr) {
+            *stuckMaterial = target;
+          }
+        }
+      }
+    }
+
+    // detail::dafNavigationTraceSink: one record per forward pass. The actor
+    // fills it when it ends the pass (or stalls); a propagation that ended
+    // with an error before that is recorded from the propagator state.
+    if (navigationPass.has_value() &&
+        detail::dafNavigationTraceSink != nullptr) {
+      DafPassNavigation nav = dafResult.navigation;
+      if (nav.stopReason == DafPassStop::None) {
+        // Ended without the actor finishing it: by the path aborter the
+        // propagator appends itself (makeState, options.pathLimit), the only
+        // other aborter on this actor list, or with an error.
+        nav.stopReason =
+            result.ok() ? DafPassStop::PathLimit
+            : result.error() ==
+                    make_error_code(PropagatorError::StepCountLimitReached)
+                ? DafPassStop::StepLimit
+                : DafPassStop::OtherError;
+        nav.pathLength = propagatorState.pathLength;
+        nav.steps = propagatorState.steps;
+        nav.stepsSinceProgress =
+            propagatorState.steps - dafResult.stepAtLastProgress;
+        nav.pathSinceProgress =
+            propagatorState.pathLength - dafResult.pathAtLastProgress;
+        nav.pathLimit = std::min(propagatorState.options.pathLimit,
+                                 dafResult.pathLimitReached.internalLimit);
+        nav.measurementStates = dafResult.measurementStates;
+        nav.positionR = std::hypot(propagatorState.position.x(),
+                                   propagatorState.position.y());
+        nav.positionZ = propagatorState.position.z();
+        detail::copyDirectNavigation(propagatorState, nav);
+      }
+      nav.pass = *navigationPass;
+      nav.isResult = navigationIsResult;
+      detail::dafNavigationTraceSink->push_back(std::move(nav));
+    }
+
     if (!result.ok()) {
       ACTS_DEBUG("Propagation failed: " << result.error());
       return result.error();
@@ -1178,17 +1248,67 @@ class DeterministicAnnealingFitter {
     // the reference-linearised split (record, then filter without propagating,
     // GenFit's KalmanFitterRefTrack). Everything downstream -- smoothing, the
     // weight update, salvaging -- is identical either way.
+    // detail::dafNavigationTraceSink: the forward passes of this fit, counted
+    // from 0, and whether the one running produces the returned track.
+    std::size_t navigationPassCounter = 0;
+    bool navigationResultPass = false;
+
+    // detail::dafDropStuckMaterial: material surfaces a pass of this fit got
+    // stuck on, removed from passSequence for every later pass.
+    std::unordered_set<const Surface*> droppedMaterial;
+    // ...and the state a salvage replay has to restore: the sequence the last
+    // good pass navigated and the drops in force when it started. Without it
+    // the replay runs on a sequence shortened by drops made after that pass,
+    // and if the drop is what made the later pass stall (the navigator then
+    // chases a straw the track cannot reach), the replay stalls too and the
+    // whole fit is lost (22 usable fits in 3000 CATFinder events, 2026-10-15).
+    std::unordered_set<const Surface*> droppedAtPassStart;
+    std::vector<const Surface*> lastGoodSequence;
+    std::unordered_set<const Surface*> lastGoodDropped;
+    // Drops undone because the pass after them failed: never dropped again in
+    // this fit (see undoDropsAfterFailure).
+    std::unordered_set<const Surface*> keepMaterial;
+
     auto runForwardPass =
         [&](const BoundTrackParameters& seed, bool firstPass, auto& container)
         -> Result<typename std::decay_t<decltype(container)>::TrackProxy> {
       rebuildSequenceFor(seed, !firstPass);
       scratchCandidateStates.clear();
+      if (!droppedMaterial.empty()) {
+        std::erase_if(passSequence, [&](const Surface* srf) {
+          return droppedMaterial.contains(srf);
+        });
+      }
+      droppedAtPassStart = droppedMaterial;
 
       if (!dafOptions.referenceLinearization) {
         auto propagatorOptions = make_propagator_options(
             measurementGroups, dafOptions, passSequencePtr, candidateState,
             scratchCandidateStates, firstPass);
-        return filter_impl(seed, propagatorOptions, container);
+        const bool dropStuck =
+            detail::dafDropStuckMaterial() && sSequence != nullptr;
+        const Surface* stuck = nullptr;
+        auto passResult = filter_impl(seed, propagatorOptions, container,
+                                      navigationPassCounter++,
+                                      navigationResultPass,
+                                      dropStuck ? &stuck : nullptr);
+        if (stuck != nullptr && !keepMaterial.contains(stuck) &&
+            droppedMaterial.insert(stuck).second) {
+          static std::atomic<long> nDropped{0};
+          if (const long n = nDropped.fetch_add(1) + 1;
+              n == 1 || n % 1000 == 0) {
+            std::fprintf(stderr,
+                         "DAF: %ld material surface(s) a pass got stuck on "
+                         "dropped from their track's sequence "
+                         "(ACTS_DAF_DROP_STUCK_MATERIAL)\n",
+                         n);
+          }
+          ACTS_DEBUG("Pass ended chasing material surface "
+                     << stuck->geometryId()
+                     << " with measurement surfaces left; dropping it from "
+                        "this track's sequence for the remaining passes");
+        }
+        return passResult;
       }
 
       // ================= x_ref, F and Q ARE REBUILT HERE =================
@@ -1616,7 +1736,9 @@ class DeterministicAnnealingFitter {
                             bool firstPass) -> Result<TrackProxy> {
       // Not on the first pass: there the seed IS the caller's, so the rebuild
       // would reproduce the sequence it was already handed.
+      navigationResultPass = true;
       auto forwardResult = runForwardPass(seed, firstPass, trackContainer);
+      navigationResultPass = false;
       if (!forwardResult.ok()) {
         return forwardResult.error();
       }
@@ -1654,10 +1776,17 @@ class DeterministicAnnealingFitter {
             extrapolationOptions.actorList.template get<MaterialInteractor>();
         matInteractor.multipleScattering = dafOptions.multipleScattering;
         matInteractor.energyLoss = dafOptions.energyLoss;
+        const auto extrapolationStart = std::chrono::steady_clock::now();
         auto extrapolationResult = extrapolateTrackToReferenceSurface(
             track, *dafOptions.referenceSurface, m_propagator,
             extrapolationOptions, dafOptions.referenceSurfaceStrategy,
             logger());
+        if (dafOptions.referenceExtrapolationSeconds != nullptr) {
+          *dafOptions.referenceExtrapolationSeconds +=
+              std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                            extrapolationStart)
+                  .count();
+        }
         if (!extrapolationResult.ok()) {
           return extrapolationResult.error();
         }
@@ -1711,6 +1840,44 @@ class DeterministicAnnealingFitter {
       return track;
     };
 
+    // detail::dafDropStuckMaterial: a pass failed while running with a drop
+    // made since the last good pass. The drop can be what broke it -- with the
+    // material surface gone the navigator chases the next target, a straw the
+    // track cannot reach either, and the stepper stalls -- so put the
+    // surface(s) back (the last good pass's sequence and drops), keep them for
+    // the rest of the fit, and let the caller re-run the same pass. Returns
+    // false, leaving everything as it was, when no such drop was in force.
+    auto undoDropsAfterFailure = [&]() {
+      if (!detail::dafDropStuckMaterial() || sSequence == nullptr ||
+          lastGoodSequence.empty()) {
+        return false;
+      }
+      std::size_t nUndone = 0;
+      for (const Surface* srf : droppedAtPassStart) {
+        if (!lastGoodDropped.contains(srf)) {
+          keepMaterial.insert(srf);
+          ++nUndone;
+        }
+      }
+      if (nUndone == 0) {
+        return false;
+      }
+      passSequence = lastGoodSequence;
+      droppedMaterial = lastGoodDropped;
+      static std::atomic<long> nUndos{0};
+      if (const long n = nUndos.fetch_add(1) + 1; n == 1 || n % 100 == 0) {
+        std::fprintf(stderr,
+                     "DAF: %ld pass(es) failed after a material drop; the drop "
+                     "was undone and the pass re-run "
+                     "(ACTS_DAF_DROP_STUCK_MATERIAL)\n",
+                     n);
+      }
+      ACTS_DEBUG("Pass failed after " << nUndone
+                                      << " material drop(s); undoing them and "
+                                         "re-running the pass");
+      return true;
+    };
+
     // Attempts to recover a result from the last known-good pass after some
     // pass failed. Falls back to returning the failing pass's own error only
     // when there is nothing to salvage (e.g. the very first pass failed).
@@ -1723,6 +1890,11 @@ class DeterministicAnnealingFitter {
                  << "); salvaging last successful pass instead of failing the "
                     "fit");
       candidateState = lastGoodCandidateState;
+      if (detail::dafDropStuckMaterial() && sSequence != nullptr &&
+          !lastGoodSequence.empty()) {
+        passSequence = lastGoodSequence;
+        droppedMaterial = lastGoodDropped;
+      }
       auto salvaged = finalizeInto(*lastGoodSeed, false);
       if (!salvaged.ok()) {
         ACTS_DEBUG("Salvage pass unexpectedly failed: " << salvaged.error());
@@ -1768,6 +1940,9 @@ class DeterministicAnnealingFitter {
 
       if (isFinalIteration) {
         auto finalTrack = finalizeInto(currentSeed, iter == 0);
+        if (!finalTrack.ok() && undoDropsAfterFailure()) {
+          finalTrack = finalizeInto(currentSeed, iter == 0);
+        }
         if (finalTrack.ok()) {
           logFitSummary("finished", finalTrack.value().chi2());
           if (dafOptions.fitStatus != nullptr) {
@@ -1786,6 +1961,11 @@ class DeterministicAnnealingFitter {
       scratchTrackContainer.clear();
       auto forwardResult =
           runForwardPass(currentSeed, iter == 0, scratchTrackContainer);
+      if (!forwardResult.ok() && undoDropsAfterFailure()) {
+        scratchTrackContainer.clear();
+        forwardResult =
+            runForwardPass(currentSeed, iter == 0, scratchTrackContainer);
+      }
       if (!forwardResult.ok()) {
         ACTS_DEBUG("DAF pass " << iter << " failed: " << forwardResult.error());
         return salvage(forwardResult.error());
@@ -1845,6 +2025,10 @@ class DeterministicAnnealingFitter {
       lastGoodSeed = currentSeed;
       lastGoodCandidateState = candidateState;
       lastGoodPass = static_cast<int>(iter);
+      if (detail::dafDropStuckMaterial() && sSequence != nullptr) {
+        lastGoodSequence = passSequence;
+        lastGoodDropped = droppedAtPassStart;
+      }
 
       // The next pass navigates the order this one actually flew, with the
       // surfaces it missed placed by its fitted track (resortSequence).

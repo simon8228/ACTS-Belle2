@@ -176,6 +176,12 @@ class DafTrackFittingAlgorithm final : public IAlgorithm {
   double m_lookaheadFallbackMinReached = 0.5;
   mutable std::atomic<std::size_t> m_nLookaheadRetries{0};
   mutable std::atomic<std::size_t> m_nLookaheadRetriesKept{0};
+  // Wall-clock time of the post-fit perigee extrapolation, summed over all
+  // events [ns], and the events it covers: finalize() prints it per event,
+  // so the fit's own time (the sequencer's ms/event minus this) can be
+  // compared with GenFit's Combined_DAFRecoFitter, which does not extrapolate.
+  mutable std::atomic<long long> m_extrapolationNanos{0};
+  mutable std::atomic<std::size_t> m_nEventsTimed{0};
 };
 
 }  // namespace ActsExamples

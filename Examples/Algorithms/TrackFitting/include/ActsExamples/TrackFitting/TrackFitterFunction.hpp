@@ -39,6 +39,10 @@ class TrackFitterFunction {
     const Acts::Surface* referenceSurface = nullptr;
     Acts::PropagatorPlainOptions propOptions;
     bool doRefit = false;
+    /// If set, a fitter that extrapolates to referenceSurface after the fit
+    /// adds the wall-clock time of that extrapolation here [s] (the DAF does;
+    /// runtime_analysis times the fit without it)
+    double* referenceExtrapolationSeconds = nullptr;
 
     GeneralFitterOptions(const Acts::GeometryContext& gCtx,
                          const Acts::MagneticFieldContext& mCtx,

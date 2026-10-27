@@ -37,6 +37,7 @@
 #include <memory>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Acts {
@@ -87,6 +88,19 @@ struct DafFitterResult {
   /// changes.
   std::size_t processedStatesAtLastProgress = 0;
 
+  /// Path length as of the same moment as stepAtLastProgress.
+  double pathAtLastProgress = 0.;
+
+  /// Measurement surfaces already filtered in this pass. A surface is filtered
+  /// once per pass: a second visit (the navigator stepping back onto the start
+  /// surface, see DafActor::filter) must neither add a second state for the
+  /// same hit nor count towards measurementStates, which ends the pass.
+  std::unordered_set<const Surface*> filteredMeasurementSurfaces;
+
+  /// How this pass ended; filled only while detail::dafNavigationTraceSink
+  /// is set.
+  DafPassNavigation navigation;
+
   /// Previous reference state's parameters and validity flag. Only used while
   /// DafActor::recordReference is set: a segment's delta state is a difference
   /// against the previous surface, so the recorder has to remember it. The
@@ -111,6 +125,40 @@ struct DafFitterResult {
 };
 
 namespace detail {
+
+/// The DirectNavigator's end-of-pass position and skip log, copied into
+/// @p nav. A no-op for any other navigator.
+template <typename propagator_state_t>
+void copyDirectNavigation(const propagator_state_t& state,
+                          DafPassNavigation& nav) {
+  if constexpr (requires {
+                  state.navigation.skips;
+                  state.navigation.surfaceIndex;
+                }) {
+    const auto& navState = state.navigation;
+    const auto& sequence = navState.options.externalSurfaces;
+    nav.navigationBroken = navState.navigationBreak;
+    nav.surfaceIndex = navState.surfaceIndex;
+    nav.sequenceSize = sequence.size();
+    nav.target = (navState.surfaceIndex >= 0 &&
+                  navState.surfaceIndex < static_cast<std::int32_t>(sequence.size()))
+                     ? sequence[navState.surfaceIndex]
+                     : nullptr;
+    nav.skips.clear();
+    nav.skips.reserve(navState.skips.size());
+    for (const auto& skip : navState.skips) {
+      DafNavigationSkip out;
+      out.index = skip.index;
+      out.surface = skip.surface;
+      out.reason = static_cast<std::uint8_t>(skip.reason);
+      out.pathToSurface = skip.pathToSurface;
+      out.positionR = skip.positionR;
+      out.positionZ = skip.positionZ;
+      out.previous = skip.previous;
+      nav.skips.push_back(out);
+    }
+  }
+}
 
 /// @brief Propagator Actor plugin for the Deterministic Annealing Filter
 ///
@@ -301,8 +349,10 @@ class DafActor {
     if (result.processedStates != result.processedStatesAtLastProgress) {
       result.processedStatesAtLastProgress = result.processedStates;
       result.stepAtLastProgress = state.steps;
+      result.pathAtLastProgress = state.pathLength;
     }
     if (state.steps - result.stepAtLastProgress > stallStepLimit) {
+      recordNavigation(state, stepper, result, DafPassStop::Stalled);
       const Vector3 pos = stepper.position(state.stepping);
       const Vector3 dir = stepper.direction(state.stepping);
       const double p = stepper.absoluteMomentum(state.stepping);
@@ -383,6 +433,13 @@ class DafActor {
         }
       }
 
+      recordNavigation(state, stepper, result,
+                       isTrackComplete              ? DafPassStop::TrackComplete
+                       : isPathLimitReached         ? DafPassStop::PathLimit
+                       : isEndOfWorldReached        ? DafPassStop::EndOfWorld
+                       : isVolumeConstraintReached  ? DafPassStop::VolumeConstraint
+                                                    : DafPassStop::TargetReached);
+
       if (isTargetReached) {
         auto res = stepper.boundState(state.stepping, *targetReached.surface);
         if (!res.ok()) {
@@ -399,6 +456,34 @@ class DafActor {
     }
 
     return Result<void>::success();
+  }
+
+  /// detail::dafNavigationTraceSink: how and where this pass ended.
+  template <typename propagator_state_t, typename stepper_t>
+  void recordNavigation(const propagator_state_t& state,
+                        const stepper_t& stepper, result_type& result,
+                        DafPassStop reason) const {
+    if (detail::dafNavigationTraceSink == nullptr) {
+      return;
+    }
+    DafPassNavigation& nav = result.navigation;
+    nav.stopReason = reason;
+    nav.pathLength = state.pathLength;
+    // The limit in force: the propagator's own path aborter (makeState)
+    // enforces options.pathLimit; the actor's internal limit is only set by
+    // loop protection.
+    nav.pathLimit = std::min(state.options.pathLimit,
+                             result.pathLimitReached.internalLimit);
+    nav.steps = state.steps;
+    nav.stepsSinceProgress = state.steps - result.stepAtLastProgress;
+    nav.pathSinceProgress = state.pathLength - result.pathAtLastProgress;
+    nav.measurementStates = result.measurementStates;
+    nav.measurementGroups =
+        inputMeasurementGroups != nullptr ? inputMeasurementGroups->size() : 0;
+    const Vector3 position = stepper.position(state.stepping);
+    nav.positionR = std::hypot(position.x(), position.y());
+    nav.positionZ = position.z();
+    copyDirectNavigation(state, nav);
   }
 
   template <typename propagator_state_t, typename stepper_t,
@@ -423,6 +508,26 @@ class DafActor {
       return Result<void>::success();
     }
     const auto groupIt = inputMeasurementGroups->find(&surface);
+    if (groupIt != inputMeasurementGroups->end() &&
+        !result.filteredMeasurementSurfaces.insert(&surface).second) {
+      // Already filtered in this pass. Until 2026-10-15 this happened on ~13%
+      // of CDC tracks in every pass after the first: the pass starts ON its
+      // first straw (filtered at pre-propagation), the navigator stepped back
+      // to a material cylinder just behind it and then reached the straw
+      // again, so the hit entered the fit twice and the pass ended one surface
+      // early. Skip it entirely: same hit, and the material is already applied.
+      static std::atomic<long> nRevisits{0};
+      if (const long n = nRevisits.fetch_add(1) + 1; n == 1 || n % 1000 == 0) {
+        std::fprintf(stderr,
+                     "DafActor: %ld measurement surface re-visit(s) within a "
+                     "pass ignored\n",
+                     n);
+      }
+      ACTS_DEBUG("Measurement surface " << surface.geometryId()
+                                        << " already filtered in this pass; "
+                                           "ignoring the re-visit");
+      return Result<void>::success();
+    }
     if (groupIt != inputMeasurementGroups->end()) {
       const DafMeasurementGroup& group = groupIt->second;
       ACTS_VERBOSE("Measurement surface " << surface.geometryId()

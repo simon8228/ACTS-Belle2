@@ -27,6 +27,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -263,6 +264,96 @@ struct DafFitStatus {
   int salvagedFromPass = -1;
 };
 
+/// Why a DAF forward pass ended (DafPassNavigation::stopReason). The first
+/// five are DafActor's own finishing conditions, in the priority it reports
+/// them; the last three end the pass with an error.
+enum class DafPassStop : std::uint8_t {
+  None = 0,
+  TrackComplete = 1,     ///< every measurement group got a state
+  PathLimit = 2,         ///< the pass path limit
+  EndOfWorld = 3,
+  VolumeConstraint = 4,
+  TargetReached = 5,
+  Stalled = 6,           ///< DafActor's stall guard (PropagationStalled)
+  StepLimit = 7,         ///< the propagator's maxSteps
+  OtherError = 8,
+};
+
+/// One surface the DirectNavigator gave up on during a pass. A copy of
+/// DirectNavigator::State::Skip, so that TrackFitting callers do not need the
+/// navigator's internals.
+struct DafNavigationSkip {
+  /// Position in the pass's surface sequence
+  std::int32_t index = -1;
+  const Surface* surface = nullptr;
+  /// DirectNavigator::State::SkipReason
+  std::uint8_t reason = 0;
+  /// Signed straight-line path to the surface's nearest intersection (NaN
+  /// when there is none)
+  double pathToSurface = std::numeric_limits<double>::quiet_NaN();
+  /// Where the track was when the navigator skipped it
+  double positionR = std::numeric_limits<double>::quiet_NaN();
+  double positionZ = std::numeric_limits<double>::quiet_NaN();
+  /// The surface in the sequence slot before it (DirectNavigator::State::Skip)
+  const Surface* previous = nullptr;
+};
+
+/// How one DAF forward pass ended and what the navigator skipped on the way.
+/// Recorded only while detail::dafNavigationTraceSink is set.
+struct DafPassNavigation {
+  /// Zero-based forward pass within the fit
+  std::size_t pass = 0;
+  /// This pass produced the returned track (the final pass, or the replay of
+  /// a salvaged fit)
+  bool isResult = false;
+  DafPassStop stopReason = DafPassStop::None;
+  /// The DirectNavigator had run out of surfaces (navigation break)
+  bool navigationBroken = false;
+  /// Sequence index the navigator was at when the pass ended (its current
+  /// target, or past the end)
+  std::int32_t surfaceIndex = -1;
+  std::size_t sequenceSize = 0;
+  /// The target being pursued when the pass ended, or null
+  const Surface* target = nullptr;
+  double pathLength = 0.;
+  double pathLimit = std::numeric_limits<double>::quiet_NaN();
+  std::size_t steps = 0;
+  /// Steps and path since the actor last handled a surface
+  std::size_t stepsSinceProgress = 0;
+  double pathSinceProgress = 0.;
+  std::size_t measurementStates = 0;
+  std::size_t measurementGroups = 0;
+  /// Where the pass ended
+  double positionR = std::numeric_limits<double>::quiet_NaN();
+  double positionZ = std::numeric_limits<double>::quiet_NaN();
+  std::vector<DafNavigationSkip> skips;
+};
+
+using DafNavigationTrace = std::vector<DafPassNavigation>;
+
+namespace detail {
+/// When set, every DAF forward pass on this thread appends its
+/// DafPassNavigation here. Thread-local and set around one fit by the caller,
+/// like directNavigatorLookaheadOverride, so the fitter interface stays as it
+/// is; null (the default) records nothing.
+inline thread_local DafNavigationTrace* dafNavigationTraceSink = nullptr;
+
+/// ACTS_DAF_DROP_STUCK_MATERIAL=1 (test, default off): when a forward pass ends
+/// with measurement surfaces left while the DirectNavigator is still chasing a
+/// MATERIAL surface (typically a CDC layer cylinder beyond the radius a curling
+/// track turns at: from inside, the straight line always meets it ahead, so
+/// the target never becomes invalid and the pass flies to its path limit),
+/// remove every occurrence of that surface from this track's sequence for the
+/// remaining passes. Per fit only; the geometry and other tracks are untouched.
+inline bool dafDropStuckMaterial() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DAF_DROP_STUCK_MATERIAL");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return value;
+}
+}  // namespace detail
+
 struct DafPassSummary {
   /// Largest absolute weight change over every candidate on every surface --
   /// GenFit's maxAbsChange in DAF::calcWeights, its primary convergence
@@ -364,6 +455,10 @@ struct DafFitterOptions {
   /// Strategy to propagate to reference surface
   TrackExtrapolationStrategy referenceSurfaceStrategy =
       TrackExtrapolationStrategy::firstOrLast;
+
+  /// If set, the wall-clock time of the post-fit extrapolation to
+  /// referenceSurface is added here [s], so a caller can time the fit without it
+  double* referenceExtrapolationSeconds = nullptr;
 
   /// Whether to consider multiple scattering
   bool multipleScattering = true;

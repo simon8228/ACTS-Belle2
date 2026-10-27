@@ -31,9 +31,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <cstdlib>
 #include <limits>
 #include <fstream>
+#include <iomanip>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -44,6 +46,30 @@
 #include <vector>
 
 namespace ActsExamples {
+
+namespace {
+/// ACTS_DAF_NAV_TRACE=1: write event*-daf-navigation.csv (how every forward
+/// pass of the kept fit ended) and event*-daf-navskips.csv (every surface the
+/// DirectNavigator gave up on in those passes) next to daf-candidates.csv.
+bool navigationTraceWanted() {
+  static const bool value = [] {
+    const char* env = std::getenv("ACTS_DAF_NAV_TRACE");
+    return env != nullptr && std::atoi(env) != 0;
+  }();
+  return value;
+}
+
+/// Points Acts::detail::dafNavigationTraceSink at `trace` for one fit call
+/// and always clears it again, also when the fit throws.
+struct NavigationTraceScope {
+  explicit NavigationTraceScope(Acts::DafNavigationTrace* trace) {
+    Acts::detail::dafNavigationTraceSink = trace;
+  }
+  ~NavigationTraceScope() { Acts::detail::dafNavigationTraceSink = nullptr; }
+  NavigationTraceScope(const NavigationTraceScope&) = delete;
+  NavigationTraceScope& operator=(const NavigationTraceScope&) = delete;
+};
+}  // namespace
 
 DafTrackFittingAlgorithm::DafTrackFittingAlgorithm(
     Config config, std::unique_ptr<const Acts::Logger> logger)
@@ -108,6 +134,14 @@ ProcessCode DafTrackFittingAlgorithm::finalize() {
                                           << m_lookaheadFallback << ", retry kept on "
                                           << m_nLookaheadRetriesKept);
   }
+  // On std::cout, not the logger: the fit scripts run this algorithm at
+  // WARNING. runtime_analysis/run_runtime.sh greps this line.
+  if (m_nEventsTimed > 0) {
+    std::cout << "DafTrackFittingAlgorithm: perigee extrapolation "
+              << 1e-6 * static_cast<double>(m_extrapolationNanos) /
+                     static_cast<double>(m_nEventsTimed)
+              << " ms/event over " << m_nEventsTimed << " events" << std::endl;
+  }
   return ProcessCode::SUCCESS;
 }
 
@@ -153,6 +187,9 @@ ProcessCode DafTrackFittingAlgorithm::execute(
       pSurface.get(),
       propOptions,
       false};
+  // time of the perigee extrapolations of this event's fits (finalize())
+  double extrapolationSeconds = 0.;
+  options.referenceExtrapolationSeconds = &extrapolationSeconds;
 
   auto trackContainer = std::make_shared<Acts::VectorTrackContainer>();
   auto trackStateContainer = std::make_shared<Acts::VectorMultiTrajectory>();
@@ -169,7 +206,26 @@ ProcessCode DafTrackFittingAlgorithm::execute(
   std::ofstream statusCsv;
   std::ofstream traceCsv;
   std::ofstream linCsv;
+  std::ofstream navCsv;
+  std::ofstream navSkipCsv;
   if (!m_cfg.outputCandidatesDir.empty()) {
+    if (navigationTraceWanted()) {
+      // One row per forward pass of the fit that was kept (attempt 1 = the
+      // look-ahead retry). stop_reason is Acts::DafPassStop, skip reason
+      // DirectNavigator::State::SkipReason (1 behind, 2 no intersection,
+      // 3 dropped unreachable, 4 unreachable material cylinder).
+      navCsv.open(perEventFilepath(m_cfg.outputCandidatesDir,
+                                   "daf-navigation.csv", ctx.eventNumber));
+      navCsv << "proto_track_id,track_id,attempt,pass,is_result,stop_reason,"
+                "nav_broken,surface_index,sequence_size,target_geometry_id,"
+                "path_length,path_limit,steps,steps_since_progress,"
+                "path_since_progress,measurement_states,measurement_groups,"
+                "end_r,end_z,n_skips\n";
+      navSkipCsv.open(perEventFilepath(m_cfg.outputCandidatesDir,
+                                       "daf-navskips.csv", ctx.eventNumber));
+      navSkipCsv << "proto_track_id,track_id,attempt,pass,is_result,seq_index,"
+                    "geometry_id,reason,path_to_surface,r,z,prev_geometry_id\n";
+    }
     candidatesCsv.open(perEventFilepath(
         m_cfg.outputCandidatesDir, "daf-candidates.csv", ctx.eventNumber));
     candidatesCsv
@@ -356,10 +412,15 @@ ProcessCode DafTrackFittingAlgorithm::execute(
     // The final candidate state is always taken: the look-ahead fallback
     // needs its `unreached` flags even when no candidates file is written.
     const std::size_t nTracksBefore = tracks.size();
-    auto result = (*m_cfg.fit)(
-        measurementGroups, orderedSurfaces, initialParams, options, calibrator,
-        tracks, &finalCandidateState, wantTrace ? &candidateTrace : nullptr,
-        &fitStatus);
+    Acts::DafNavigationTrace navigationTrace;
+    int navigationAttempt = 0;
+    auto result = [&] {
+      NavigationTraceScope scope(navCsv.is_open() ? &navigationTrace : nullptr);
+      return (*m_cfg.fit)(
+          measurementGroups, orderedSurfaces, initialParams, options,
+          calibrator, tracks, &finalCandidateState,
+          wantTrace ? &candidateTrace : nullptr, &fitStatus);
+    }();
 
     // Look-ahead fallback (ACTS_DAF_LOOKAHEAD_FALLBACK=N): a fit that failed,
     // was salvaged, or reached fewer than the minimum fraction of its
@@ -399,12 +460,17 @@ ProcessCode DafTrackFittingAlgorithm::execute(
         Acts::DafCandidateMap retryState;
         Acts::DafCandidateTrace retryTrace;
         Acts::DafFitStatus retryStatus;
+        Acts::DafNavigationTrace retryNavigation;
         Acts::detail::directNavigatorLookaheadOverride =
             static_cast<std::size_t>(m_lookaheadFallback);
-        auto retry = (*m_cfg.fit)(
-            measurementGroups, orderedSurfaces, initialParams, options,
-            calibrator, tracks, &retryState,
-            wantTrace ? &retryTrace : nullptr, &retryStatus);
+        auto retry = [&] {
+          NavigationTraceScope scope(navCsv.is_open() ? &retryNavigation
+                                                      : nullptr);
+          return (*m_cfg.fit)(
+              measurementGroups, orderedSurfaces, initialParams, options,
+              calibrator, tracks, &retryState,
+              wantTrace ? &retryTrace : nullptr, &retryStatus);
+        }();
         Acts::detail::directNavigatorLookaheadOverride.reset();
         const auto second = score(retry.ok(), retryStatus, retryState);
         // Ties keep the first fit, so the default's tracks never change.
@@ -421,6 +487,8 @@ ProcessCode DafTrackFittingAlgorithm::execute(
           finalCandidateState = std::move(retryState);
           candidateTrace = std::move(retryTrace);
           fitStatus = retryStatus;
+          navigationTrace = std::move(retryNavigation);
+          navigationAttempt = 1;
           if (retry.ok()) {
             // The retry's track moved down by the first fit's track count.
             const auto index = retry.value().index() - (nTracksMid - nTracksBefore);
@@ -448,6 +516,36 @@ ProcessCode DafTrackFittingAlgorithm::execute(
                 << (fitStatus.salvaged ? 1 : 0) << ','
                 << fitStatus.salvagedFromPass << ','
                 << (result.ok() ? 0 : 1) << ',' << lookaheadRetry << '\n';
+    }
+
+    if (navCsv.is_open()) {
+      const long long trackId =
+          result.ok() ? static_cast<long long>(result.value().index()) : -1LL;
+      const auto geoId = [](const Acts::Surface* surface) {
+        return surface != nullptr ? surface->geometryId().value() : 0ULL;
+      };
+      navCsv << std::setprecision(10);
+      navSkipCsv << std::setprecision(10);
+      for (const Acts::DafPassNavigation& pass : navigationTrace) {
+        navCsv << itrack << ',' << trackId << ',' << navigationAttempt << ','
+               << pass.pass << ',' << (pass.isResult ? 1 : 0) << ','
+               << static_cast<int>(pass.stopReason) << ','
+               << (pass.navigationBroken ? 1 : 0) << ',' << pass.surfaceIndex
+               << ',' << pass.sequenceSize << ',' << geoId(pass.target) << ','
+               << pass.pathLength << ',' << pass.pathLimit << ',' << pass.steps
+               << ',' << pass.stepsSinceProgress << ','
+               << pass.pathSinceProgress << ',' << pass.measurementStates << ','
+               << pass.measurementGroups << ',' << pass.positionR << ','
+               << pass.positionZ << ',' << pass.skips.size() << '\n';
+        for (const Acts::DafNavigationSkip& skip : pass.skips) {
+          navSkipCsv << itrack << ',' << trackId << ',' << navigationAttempt
+                     << ',' << pass.pass << ',' << (pass.isResult ? 1 : 0)
+                     << ',' << skip.index << ',' << geoId(skip.surface) << ','
+                     << static_cast<int>(skip.reason) << ','
+                     << skip.pathToSurface << ',' << skip.positionR << ','
+                     << skip.positionZ << ',' << geoId(skip.previous) << '\n';
+        }
+      }
     }
 
     if (result.ok()) {
@@ -622,6 +720,8 @@ ProcessCode DafTrackFittingAlgorithm::execute(
           std::move(*trackStateContainer))};
 
   m_outputTracks(ctx, std::move(constTracks));
+  m_extrapolationNanos += static_cast<long long>(extrapolationSeconds * 1e9);
+  ++m_nEventsTimed;
   return ProcessCode::SUCCESS;
 }
 

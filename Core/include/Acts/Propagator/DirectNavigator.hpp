@@ -36,6 +36,7 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace Acts {
 
@@ -111,7 +112,15 @@ inline std::size_t directNavigatorLookahead() {
 /// up to X mm behind the current position, instead of Options::nearLimit
 /// (-0.1 mm). The stepper takes a target behind it (its own near limit is
 /// -inf), so the track steps back to the straw it just passed instead of
-/// dropping it for good. Material surfaces keep the default. Default 5 mm
+/// dropping it for good. The test is on the geometry id's sensitive field,
+/// and the CDC material cylinders carry one too, so in the CDC they get the
+/// same limit. That is kept on purpose: a layer cylinder the look-ahead jumped
+/// past is stepped back to and its material applied. Testing by surface type
+/// instead (tried 2026-10-15) skipped ~30000 more cylinders in 3000 CATFinder
+/// events, and the missing material cost more hits than it saved. The one
+/// harmful case, stepping back from a pass's start straw onto the cylinder
+/// just behind it and then re-filtering the straw, is caught by the DAF actor
+/// instead (DafFitterResult::filteredMeasurementSurfaces). Default 5 mm
 /// since 2026-10-02 (FIT_CHANGES N9); X <= 0 turns it off. Returns the near
 /// limit to use (negative), or 0 when off.
 inline double directNavigatorSensitiveNearLimit() {
@@ -241,6 +250,10 @@ class DirectNavigator {
     /// The far limit to resolve surfaces
     double farLimit = std::numeric_limits<double>::max();
 
+    /// Record every surface given up on in State::skips (the DAF's
+    /// navigation trace sets this; off by default)
+    bool recordSkips = false;
+
     /// Set the plain navigator options
     /// @param options The plain navigator options to copy
     void setPlainOptions(const NavigatorPlainOptions& options) {
@@ -291,6 +304,35 @@ class DirectNavigator {
     /// the steps spent on it.
     std::int32_t pursuedIndex = -2;
     unsigned int pursuedSteps = 0;
+
+    /// Why the navigator gave up on a surface of the sequence.
+    enum class SkipReason : std::uint8_t {
+      /// Its nearest straight-line intersection lies behind the near limit
+      Behind = 1,
+      /// No valid straight-line intersection at all
+      NoIntersection = 2,
+      /// ACTS_DN_DROP_UNREACHABLE dropped it as the current target
+      DroppedUnreachable = 3,
+      /// ACTS_DN_DROP_UNREACHABLE skipped an unreachable material cylinder
+      MaterialUnreachable = 4,
+    };
+    /// One surface given up on. The index never comes back, so every entry is
+    /// a surface this propagation can no longer visit.
+    struct Skip {
+      std::int32_t index = -1;
+      const Surface* surface = nullptr;
+      SkipReason reason = SkipReason::Behind;
+      /// Signed path to the nearest straight-line intersection, NaN if none
+      double pathToSurface = std::numeric_limits<double>::quiet_NaN();
+      /// Track position when it was given up on
+      double positionR = 0.;
+      double positionZ = 0.;
+      /// The surface in the slot before it: for the first skip after a
+      /// target was reached, the surface just reached
+      const Surface* previous = nullptr;
+    };
+    /// Filled only while Options::recordSkips is set; empty otherwise.
+    std::vector<Skip> skips;
 
     /// Navigation statistics
     NavigatorStatistics statistics;
@@ -528,7 +570,9 @@ class DirectNavigator {
           continue;
         }
         // A straw just passed is still a valid target when
-        // ACTS_DN_NEAR_LIMIT_MM is set; material surfaces keep the default.
+        // ACTS_DN_NEAR_LIMIT_MM is set. By id, so the CDC material cylinders
+        // (which carry a sensitive id) get it too -- see
+        // directNavigatorSensitiveNearLimit for why that stays.
         double nearLimit = state.options.nearLimit;
         const double sensitiveNear = detail::directNavigatorSensitiveNearLimit();
         if (sensitiveNear < 0. && candidateSurface.geometryId().sensitive() != 0) {
@@ -612,6 +656,9 @@ class DirectNavigator {
       ACTS_VERBOSE("No valid intersection found with surface "
                    << state.navSurface().geometryId()
                    << ", trying next surface.");
+      if (state.options.recordSkips) {
+        recordSkip(state, position, direction);
+      }
       state.nextSurface();
     }
 
@@ -664,6 +711,15 @@ class DirectNavigator {
     ACTS_VERBOSE("Dropping target " << target.geometryId()
                                     << ": the local helix no longer reaches it "
                                        "(ACTS_DN_DROP_UNREACHABLE)");
+    if (state.options.recordSkips) {
+      State::Skip skip;
+      skip.index = state.surfaceIndex;
+      skip.surface = &target;
+      skip.reason = State::SkipReason::DroppedUnreachable;
+      skip.positionR = std::hypot(position.x(), position.y());
+      skip.positionZ = position.z();
+      state.skips.push_back(skip);
+    }
     // The next nextTarget() call advances past it.
     return false;
   }
@@ -697,6 +753,51 @@ class DirectNavigator {
   }
 
  private:
+  /// Options::recordSkips: log the surface at the current index, which
+  /// nextTarget() is about to give up on, with why. The reason is worked out
+  /// again here rather than carried out of the search, so the search itself is
+  /// untouched: an unreachable material cylinder (ACTS_DN_DROP_UNREACHABLE),
+  /// else the nearest valid straight-line intersection -- which the search
+  /// rejected, so it lies behind the near limit -- else none at all.
+  void recordSkip(State& state, const Vector3& position,
+                  const Vector3& direction) const {
+    const Surface& surface = state.navSurface();
+    State::Skip skip;
+    skip.index = state.surfaceIndex;
+    skip.surface = &surface;
+    skip.positionR = std::hypot(position.x(), position.y());
+    skip.positionZ = position.z();
+    {
+      const std::int32_t step =
+          state.direction == Direction::Forward() ? 1 : -1;
+      const std::int32_t prev = state.surfaceIndex - step;
+      if (prev >= 0 &&
+          prev < static_cast<std::int32_t>(state.options.externalSurfaces.size())) {
+        skip.previous = state.options.externalSurfaces[prev];
+      }
+    }
+    skip.reason = State::SkipReason::NoIntersection;
+    if (detail::directNavigatorDropUnreachable() > 0 && state.hasQopField &&
+        surface.type() == Surface::Cylinder &&
+        !cylinderReachable(surface, position, direction, state.qopField)) {
+      skip.reason = State::SkipReason::MaterialUnreachable;
+    } else {
+      auto intersections = surface.intersect(
+          state.options.geoContext, position, direction,
+          BoundaryTolerance::Infinite(), state.options.surfaceTolerance);
+      for (const auto& intersection : intersections) {
+        if (intersection.isValid() &&
+            (std::isnan(skip.pathToSurface) ||
+             std::abs(intersection.pathLength()) <
+                 std::abs(skip.pathToSurface))) {
+          skip.pathToSurface = intersection.pathLength();
+          skip.reason = State::SkipReason::Behind;
+        }
+      }
+    }
+    state.skips.push_back(skip);
+  }
+
   /// ACTS_DN_HELIX_HOLD: does the local helix from (position, direction),
   /// d(direction)/ds = direction x qopField, pass this straw within its cell
   /// ahead of here? Exact helix in the local field, sampled every 2 mm up to

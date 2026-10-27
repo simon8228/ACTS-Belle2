@@ -30,6 +30,7 @@
 #include "ActsExamples/TrackFitting/DirectNavigationSequence.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -557,6 +558,8 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
         extensions, options.propOptions, options.referenceSurface,
         multipleScattering, energyLoss, freeToBoundCorrection, annealingConfig,
         iterationsPerTemperature, maxIterations);
+    dafOptions.referenceExtrapolationSeconds =
+        options.referenceExtrapolationSeconds;
 
     dafOptions.referenceSurfaceStrategy =
         Acts::TrackExtrapolationStrategy::first;
@@ -643,6 +646,17 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
                                     .template get<Acts::MaterialInteractor>();
           matInteractor.multipleScattering = multipleScattering;
           matInteractor.energyLoss = extrapolationEnergyLoss(energyLoss);
+          // Wall-clock time of this extrapolation, for a caller timing the
+          // fit without it (GeneralFitterOptions::referenceExtrapolationSeconds).
+          const auto extrapolationStart = std::chrono::steady_clock::now();
+          auto addExtrapolationTime = [&]() {
+            if (options.referenceExtrapolationSeconds != nullptr) {
+              *options.referenceExtrapolationSeconds +=
+                  std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - extrapolationStart)
+                      .count();
+            }
+          };
           if (o2MaterialDumpDir() != nullptr) {
             // Same extrapolation, with the material recorded and written out.
             matInteractor.recordInteractions = true;
@@ -650,6 +664,7 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
                 result.value(), *options.referenceSurface, referencePropagator,
                 extrapolationOptions, dafOptions.referenceSurfaceStrategy,
                 options.geoContext);
+            addExtrapolationTime();
             if (!dumped.ok()) {
               return dumped.error();
             }
@@ -657,6 +672,7 @@ struct DafFitterFunctionImpl final : public DafFitterFunction {
             auto extrapolationResult = Acts::extrapolateTrackToReferenceSurface(
                 result.value(), *options.referenceSurface, referencePropagator,
                 extrapolationOptions, dafOptions.referenceSurfaceStrategy);
+            addExtrapolationTime();
             if (!extrapolationResult.ok()) {
               return extrapolationResult.error();
             }
